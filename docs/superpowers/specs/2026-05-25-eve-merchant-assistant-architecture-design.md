@@ -4,7 +4,7 @@ Date: 2026-05-25
 
 ## Purpose
 
-Build a personal EVE Online merchant assistant focused first on a Jita 4-4 station-trading workflow. The first architectural goal is to create a robust local Web Dashboard foundation that can support market price lookup, item selection discovery, and authenticated order monitoring before later expanding into broader trading, hauling, manufacturing, and portfolio analysis.
+Build a personal EVE Online merchant assistant focused first on a Jita 4-4 station-trading workflow. The first architectural goal is to create a robust local desktop application that can support market price lookup, item selection discovery, and authenticated order monitoring before later expanding into broader trading, hauling, manufacturing, and portfolio analysis.
 
 This document defines the architecture baseline. The current MVP product scope is defined in `docs/superpowers/specs/2026-05-25-jita-two-board-station-trading-mvp-design.md`.
 
@@ -16,35 +16,38 @@ Initial assumptions:
 
 - The app is a local single-user tool.
 - The first market focus is Jita 4-4, using public The Forge/Jita market data where needed.
-- The UI is a browser-based dashboard.
+- The UI is a Tauri desktop app with a React/Vite interface.
 - The backend owns market data sync, EVE SSO for private order monitoring, ESI access, local storage, synchronization, and analysis.
 - The system provides recommendations and diagnostics only. It does not place, modify, or cancel EVE orders.
 - Market price lookup is a shared capability used by both selection discovery and order monitoring.
 
 ## Recommended Stack
 
-Use a Rust backend with a TypeScript Web Dashboard:
+Use a Tauri desktop app with a Rust core and a TypeScript UI:
 
 - Frontend: React, Vite, TanStack Query, TanStack Table
-- Backend: Rust, Axum, Tokio
+- Desktop shell: Tauri 2
+- Backend/core: Rust, Tokio
 - Storage: SQLite for MVP, with schema discipline that allows later PostgreSQL migration
 - Database access: SQLx
 - HTTP client: reqwest
 - Serialization and validation: serde plus explicit domain validation
 - Money math: rust_decimal or integer minor-unit modeling where appropriate
 - Scheduling: simple Tokio-based in-process scheduler for MVP, with a clear path to a durable queue if job reliability requires it
-- Deployment shape: local development first, Docker Compose later if server deployment becomes useful
+- Deployment shape: local desktop development first; a Web/server adapter can be added later if remote access becomes useful
 
-The primary reason for this stack is a stable, strongly typed backend for ESI sync, token handling, snapshots, and trading calculations while keeping the UI fast to build in React. TypeScript remains the frontend language only; backend business logic should live in Rust.
+The primary reason for this stack is a stable, strongly typed Rust core for ESI sync, token handling, snapshots, and trading calculations while keeping the UI fast to build in React. TypeScript remains the UI language only; backend business logic should live in Rust. Tauri command handlers should be thin adapters over `crates/domain`, `crates/esi`, `crates/db`, and `crates/worker`.
 
 ## Architecture
 
 The system should be structured as a backend-driven analysis tool:
 
 ```text
-React Web Dashboard
+Tauri Desktop App
         |
-Axum API
+React/Vite UI
+        |
+Tauri Commands
         |
 Application Services
         |
@@ -61,32 +64,31 @@ Suggested project layout:
 
 ```text
 crates/
-  api/              Axum API, routing, auth callbacks, HTTP view models
   domain/           Spread, liquidity, profitability, repricing, urgency, ranking
   esi/              Public and authenticated ESI clients, response validation, cache metadata
   db/               SQLx schema access, migrations, repositories
   worker/           Sync orchestration and scheduled jobs
 apps/
-  web/              React dashboard, price lookup, selection board, monitor board
+  desktop/          Tauri shell, React UI, command handlers, SSO callback adapter
 ```
 
 The most important rule is that React must not own business calculations. The frontend requests prepared analysis results and renders them. Price lookup, spread calculation, liquidity scoring, selection ranking, order urgency, stale-data detection, risk tags, and repricing suggestions live in `crates/domain`.
 
 ## Data Flow
 
-1. The user opens the local dashboard.
+1. The user opens the desktop app.
 2. The backend resolves item metadata and public Jita market data for price lookup and selection discovery.
 3. Public ESI responses are validated and stored as snapshots.
 4. If order monitoring is used, the backend starts EVE SSO and stores refresh credentials locally after authorization.
 5. Authenticated sync jobs pull character orders and relevant Jita market data from ESI.
 6. Domain services compute price state, item opportunity, order urgency, risk, and suggested actions.
-7. The dashboard reads analyzed API views from the backend.
+7. The UI invokes Tauri commands to read analyzed views from the Rust core.
 
 The app should prefer snapshot-based analysis over purely live API reads. Snapshots make it possible to reason about price drift, liquidity changes, order age, filled quantity, stale items, and trend changes.
 
 ## Module Boundaries
 
-### Web Dashboard
+### Desktop UI
 
 Responsibilities:
 
@@ -105,14 +107,14 @@ Non-responsibilities:
 - Liquidity and selection scoring.
 - Repricing logic.
 
-### API
+### Tauri Command Adapter
 
 Responsibilities:
 
-- Host local HTTP endpoints for the dashboard.
-- Resolve item lookup and market price lookup requests.
+- Expose safe desktop commands for market lookup, sync, settings, SSO, and monitor views.
+- Resolve item lookup and market price lookup requests through application services.
 - Handle EVE SSO login and callback.
-- Expose analyzed dashboard views.
+- Expose analyzed view models to the React UI.
 - Trigger and report sync jobs.
 - Enforce validation at request and response boundaries.
 
@@ -170,7 +172,7 @@ The schema should avoid storing only the latest state. Historical snapshots are 
 
 ## Reliability Rules
 
-- Never store EVE refresh tokens in browser local storage.
+- Never store EVE refresh tokens in WebView storage or frontend state.
 - Respect ESI cache and error-limit behavior.
 - Treat every ESI response as untrusted input and validate it.
 - Make sync idempotent where possible.
@@ -184,7 +186,7 @@ The first implementation plan should include:
 
 - Unit tests for domain calculations.
 - Fixture-based tests for ESI response normalization.
-- API tests for auth state, sync status, and analyzed order views.
+- Command/API adapter tests for auth state, sync status, and analyzed order views.
 - Frontend smoke tests for core dashboard states once UI exists.
 
 Profit, fee, and repricing formulas need focused test coverage because small calculation errors can produce bad trading advice.
@@ -199,7 +201,7 @@ These items are intentionally left for later product design:
 - How to estimate acquisition cost for sell orders.
 - Whether to support multiple characters in the first release.
 - Whether sync should be manual-only or scheduled in MVP.
-- Whether to package the local Web Dashboard into a desktop app later.
+- Whether to add a separate Web/server adapter later.
 - Whether to migrate from SQLite to PostgreSQL.
 - Whether to introduce a durable queue for background jobs.
 - Whether to rewrite selected modules in Rust after the workflow is proven.
@@ -210,8 +212,8 @@ When implementation begins, start with the smallest vertical slice:
 
 1. Create the monorepo structure.
 2. Add `crates/domain` with tested price-state, spread, liquidity, and repricing primitives.
-3. Add a stubbed Axum API that returns fixture-based market lookup, selection, and order-monitor views.
-4. Add the dashboard shell against that API.
+3. Add stubbed Tauri commands that return fixture-based market lookup, selection, and order-monitor views.
+4. Add the desktop UI shell against those commands.
 5. Add public ESI market sync for price lookup and selection discovery.
 6. Add EVE SSO and authenticated character-order sync after the public analysis workflow is visible.
 

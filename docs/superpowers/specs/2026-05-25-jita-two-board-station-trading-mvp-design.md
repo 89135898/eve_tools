@@ -19,6 +19,7 @@ This version is a single-user local tool.
 
 In scope:
 
+- Tauri desktop app shell
 - Jita market price lookup
 - Jita-focused selection discovery
 - Public market order analysis
@@ -32,9 +33,9 @@ Out of scope:
 - Automated order placement or cancellation
 - Wallet, assets, industry, or hauling workflows
 - Cloud accounts or multi-user sharing
+- Separate browser-hosted Web app
 - Multi-region expansion
 - Corporation-level analysis
-- Desktop packaging
 
 ## User Outcomes
 
@@ -160,12 +161,14 @@ The tool should not hard-code a single fee formula without user-adjustable input
 
 ## Architecture
 
-Keep the same backend-driven Web Dashboard shape, but split public and authenticated flows:
+Use a desktop-first shape, with React for the UI and Rust for all ESI, storage, sync, and analysis logic. Public and authenticated flows remain separate inside the Rust core:
 
 ```text
-React Web Dashboard
+Tauri Desktop App
         |
-Axum API
+React/Vite UI
+        |
+Tauri Commands
         |
 Application Services
         |
@@ -180,16 +183,15 @@ Suggested module split:
 
 ```text
 crates/
-  api/              Axum routes, price lookup, SSO callback, monitor endpoints
   domain/           spread, liquidity, profitability, urgency, ranking
   esi/              public and authenticated ESI clients
   db/               SQLx storage, snapshots, repositories
   worker/           public sync, authenticated sync, scheduled jobs
 apps/
-  web/              price lookup, selection board, monitor board, settings
+  desktop/          Tauri shell, React UI, commands, settings
 ```
 
-The two boards should share the same domain engine, but the public-selection pipeline and the authenticated-order pipeline must remain separate at the transport layer.
+The two boards should share the same domain engine, but the public-selection pipeline and the authenticated-order pipeline must remain separate inside the command and service layers. Tauri commands should not contain trading logic; they should validate inputs, call services, and return view models.
 
 ## Data Flow
 
@@ -200,7 +202,7 @@ The two boards should share the same domain engine, but the public-selection pip
 3. The backend reads fresh cached Jita data if available.
 4. If cache is missing or stale, the backend schedules or performs a public market sync.
 5. Domain services compute spread, depth, volume, trend, and data-quality fields.
-6. The UI shows a read-only market detail view and actions to add the item to a watchlist or candidate pool.
+6. The desktop UI shows a read-only market detail view and actions to add the item to a watchlist or candidate pool.
 
 ### Selection Discovery Flow
 
@@ -209,7 +211,7 @@ The two boards should share the same domain engine, but the public-selection pip
 3. The sync job fetches public Jita market orders and market history.
 4. The backend stores snapshots locally.
 5. Domain services compute spread, volume, liquidity, and net-profit estimates.
-6. The UI ranks candidates and shows reasons.
+6. The desktop UI ranks candidates and shows reasons.
 
 ### Order Monitor Flow
 
@@ -218,7 +220,7 @@ The two boards should share the same domain engine, but the public-selection pip
 3. A sync job loads the character's open orders.
 4. The backend compares them to current Jita conditions.
 5. Domain services compute repricing urgency and a target price.
-6. The UI highlights orders that need attention.
+6. The desktop UI highlights orders that need attention.
 
 ## Data Model Direction
 
@@ -247,7 +249,7 @@ Historical snapshots matter because both item selection and order monitoring dep
 - Show stale-data flags instead of silently reusing old recommendations.
 - Validate all ESI responses before persistence.
 - Keep all money calculations out of floating-point arithmetic where precision matters.
-- Store refresh tokens securely in local storage only; never expose them to the browser.
+- Store refresh tokens securely in local Rust-controlled storage only; never expose them to WebView storage or frontend state.
 
 ## Error Handling
 
@@ -271,7 +273,7 @@ The implementation plan should include:
 - Unit tests for spread, liquidity, net-profit, and urgency scoring
 - Fixture-based tests for public market normalization
 - Fixture-based tests for authenticated character-order normalization
-- API tests for price lookup, candidate sync, SSO flow, and monitor endpoints
+- Command adapter tests for price lookup, candidate sync, SSO flow, and monitor endpoints
 - UI smoke tests for price lookup, both boards, and the settings screen
 
 The ranking model is the highest-risk part of the MVP and needs direct test coverage.
@@ -287,7 +289,7 @@ These are intentionally out of scope for the first version:
 - Cloud sync and account management
 - Corporation or alliance overlays
 - Manufacturing and hauling analytics
-- Desktop packaging
+- Separate Web/server adapter
 
 ## Success Criteria
 
