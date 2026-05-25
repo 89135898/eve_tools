@@ -165,7 +165,7 @@ Keep the same backend-driven Web Dashboard shape, but split public and authentic
 ```text
 React Web Dashboard
         |
-Fastify API
+Axum API
         |
 Application Services
         |
@@ -179,14 +179,14 @@ Public ESI / Authenticated ESI
 Suggested module split:
 
 ```text
-apps/
-  api/              price lookup, public sync, SSO callback, order monitor, recommendations
-  web/              price lookup, selection board, monitor board, settings
-packages/
+crates/
+  api/              Axum routes, price lookup, SSO callback, monitor endpoints
   domain/           spread, liquidity, profitability, urgency, ranking
   esi/              public and authenticated ESI clients
-  db/               local storage, snapshots, repositories
-  shared/           view models and shared types
+  db/               SQLx storage, snapshots, repositories
+  worker/           public sync, authenticated sync, scheduled jobs
+apps/
+  web/              price lookup, selection board, monitor board, settings
 ```
 
 The two boards should share the same domain engine, but the public-selection pipeline and the authenticated-order pipeline must remain separate at the transport layer.

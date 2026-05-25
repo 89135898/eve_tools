@@ -23,17 +23,19 @@ Initial assumptions:
 
 ## Recommended Stack
 
-Use a TypeScript Web Dashboard architecture:
+Use a Rust backend with a TypeScript Web Dashboard:
 
 - Frontend: React, Vite, TanStack Query, TanStack Table
-- Backend: Node.js LTS, TypeScript, Fastify
+- Backend: Rust, Axum, Tokio
 - Storage: SQLite for MVP, with schema discipline that allows later PostgreSQL migration
-- Validation: Zod or Fastify JSON Schema at external boundaries
-- Money math: decimal.js or an equivalent decimal arithmetic library
-- Scheduling: simple in-process scheduler for MVP, with a clear path to BullMQ plus Redis if durable jobs become necessary
+- Database access: SQLx
+- HTTP client: reqwest
+- Serialization and validation: serde plus explicit domain validation
+- Money math: rust_decimal or integer minor-unit modeling where appropriate
+- Scheduling: simple Tokio-based in-process scheduler for MVP, with a clear path to a durable queue if job reliability requires it
 - Deployment shape: local development first, Docker Compose later if server deployment becomes useful
 
-The primary reason for this stack is iteration speed with clear module boundaries. Rust remains a viable future option for replacing specific backend components, but the first version should prioritize getting the order workflow and analysis model right.
+The primary reason for this stack is a stable, strongly typed backend for ESI sync, token handling, snapshots, and trading calculations while keeping the UI fast to build in React. TypeScript remains the frontend language only; backend business logic should live in Rust.
 
 ## Architecture
 
@@ -42,7 +44,7 @@ The system should be structured as a backend-driven analysis tool:
 ```text
 React Web Dashboard
         |
-Fastify API
+Axum API
         |
 Application Services
         |
@@ -58,17 +60,17 @@ Public ESI / EVE SSO / Authenticated ESI
 Suggested project layout:
 
 ```text
-apps/
-  api/              Fastify API, price lookup, sync orchestration, auth callbacks
-  web/              React dashboard, price lookup, selection board, monitor board
-packages/
+crates/
+  api/              Axum API, routing, auth callbacks, HTTP view models
   domain/           Spread, liquidity, profitability, repricing, urgency, ranking
   esi/              Public and authenticated ESI clients, response validation, cache metadata
-  db/               Schema, migrations, repositories
-  shared/           Shared types that are safe to expose to UI
+  db/               SQLx schema access, migrations, repositories
+  worker/           Sync orchestration and scheduled jobs
+apps/
+  web/              React dashboard, price lookup, selection board, monitor board
 ```
 
-The most important rule is that React must not own business calculations. The frontend requests prepared analysis results and renders them. Price lookup, spread calculation, liquidity scoring, selection ranking, order urgency, stale-data detection, risk tags, and repricing suggestions live in `packages/domain`.
+The most important rule is that React must not own business calculations. The frontend requests prepared analysis results and renders them. Price lookup, spread calculation, liquidity scoring, selection ranking, order urgency, stale-data detection, risk tags, and repricing suggestions live in `crates/domain`.
 
 ## Data Flow
 
@@ -199,7 +201,7 @@ These items are intentionally left for later product design:
 - Whether sync should be manual-only or scheduled in MVP.
 - Whether to package the local Web Dashboard into a desktop app later.
 - Whether to migrate from SQLite to PostgreSQL.
-- Whether to introduce Redis and BullMQ for durable background jobs.
+- Whether to introduce a durable queue for background jobs.
 - Whether to rewrite selected modules in Rust after the workflow is proven.
 
 ## First Implementation Direction
@@ -207,8 +209,8 @@ These items are intentionally left for later product design:
 When implementation begins, start with the smallest vertical slice:
 
 1. Create the monorepo structure.
-2. Add the domain package with tested price-state, spread, liquidity, and repricing primitives.
-3. Add a stubbed API that returns fixture-based market lookup, selection, and order-monitor views.
+2. Add `crates/domain` with tested price-state, spread, liquidity, and repricing primitives.
+3. Add a stubbed Axum API that returns fixture-based market lookup, selection, and order-monitor views.
 4. Add the dashboard shell against that API.
 5. Add public ESI market sync for price lookup and selection discovery.
 6. Add EVE SSO and authenticated character-order sync after the public analysis workflow is visible.
