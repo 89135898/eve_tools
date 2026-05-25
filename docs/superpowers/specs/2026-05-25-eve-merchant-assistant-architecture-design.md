@@ -4,21 +4,22 @@ Date: 2026-05-25
 
 ## Purpose
 
-Build a personal EVE Online merchant assistant focused first on a Jita single-station order trader workflow. The first architectural goal is to create a robust local Web Dashboard foundation that can later support broader order trading, hauling, manufacturing, and portfolio analysis.
+Build a personal EVE Online merchant assistant focused first on a Jita 4-4 station-trading workflow. The first architectural goal is to create a robust local Web Dashboard foundation that can support market price lookup, item selection discovery, and authenticated order monitoring before later expanding into broader trading, hauling, manufacturing, and portfolio analysis.
 
-This document intentionally defines the architecture baseline before detailed product requirements are finalized. Feature scope, ranking formulas, and exact dashboard views will be refined in later design discussions.
+This document defines the architecture baseline. The current MVP product scope is defined in `docs/superpowers/specs/2026-05-25-jita-two-board-station-trading-mvp-design.md`.
 
 ## Current Scope Baseline
 
-The first phase targets a personal order merchant who wants operational help managing existing orders, not automated trading.
+The first phase targets a Jita station trader who wants help finding tradeable items and monitoring active orders, not automated trading.
 
 Initial assumptions:
 
 - The app is a local single-user tool.
-- The first market focus is Jita 4-4.
+- The first market focus is Jita 4-4, using public The Forge/Jita market data where needed.
 - The UI is a browser-based dashboard.
-- The backend owns EVE SSO, ESI access, local storage, synchronization, and analysis.
+- The backend owns market data sync, EVE SSO for private order monitoring, ESI access, local storage, synchronization, and analysis.
 - The system provides recommendations and diagnostics only. It does not place, modify, or cancel EVE orders.
+- Market price lookup is a shared capability used by both selection discovery and order monitoring.
 
 ## Recommended Stack
 
@@ -51,35 +52,35 @@ Database
         |
 Background Sync
         |
-EVE SSO / ESI
+Public ESI / EVE SSO / Authenticated ESI
 ```
 
 Suggested project layout:
 
 ```text
 apps/
-  api/              Fastify API, auth callbacks, sync orchestration
-  web/              React dashboard
+  api/              Fastify API, price lookup, sync orchestration, auth callbacks
+  web/              React dashboard, price lookup, selection board, monitor board
 packages/
-  domain/           Profit, repricing, risk, ranking, order classification
-  esi/              ESI client, response validation, cache metadata
+  domain/           Spread, liquidity, profitability, repricing, urgency, ranking
+  esi/              Public and authenticated ESI clients, response validation, cache metadata
   db/               Schema, migrations, repositories
   shared/           Shared types that are safe to expose to UI
 ```
 
-The most important rule is that React must not own business calculations. The frontend requests prepared analysis results and renders them. Profit calculation, order urgency, stale-order detection, risk tags, and repricing suggestions live in `packages/domain`.
+The most important rule is that React must not own business calculations. The frontend requests prepared analysis results and renders them. Price lookup, spread calculation, liquidity scoring, selection ranking, order urgency, stale-data detection, risk tags, and repricing suggestions live in `packages/domain`.
 
 ## Data Flow
 
 1. The user opens the local dashboard.
-2. If no character is authorized, the backend starts EVE SSO.
-3. The backend receives the OAuth callback and stores refresh credentials locally.
-4. A sync job pulls character orders and relevant Jita market data from ESI.
-5. ESI responses are validated and stored as snapshots.
-6. Domain services compute order status, opportunity, risk, and suggested actions.
+2. The backend resolves item metadata and public Jita market data for price lookup and selection discovery.
+3. Public ESI responses are validated and stored as snapshots.
+4. If order monitoring is used, the backend starts EVE SSO and stores refresh credentials locally after authorization.
+5. Authenticated sync jobs pull character orders and relevant Jita market data from ESI.
+6. Domain services compute price state, item opportunity, order urgency, risk, and suggested actions.
 7. The dashboard reads analyzed API views from the backend.
 
-The app should prefer snapshot-based analysis over purely live API reads. Snapshots make it possible to reason about order age, price drift, filled quantity, stale items, and trend changes.
+The app should prefer snapshot-based analysis over purely live API reads. Snapshots make it possible to reason about price drift, liquidity changes, order age, filled quantity, stale items, and trend changes.
 
 ## Module Boundaries
 
@@ -87,6 +88,8 @@ The app should prefer snapshot-based analysis over purely live API reads. Snapsh
 
 Responsibilities:
 
+- Display market price lookup results.
+- Display selection discovery results.
 - Display order tables, filters, detail panels, and charts.
 - Trigger manual sync.
 - Show sync status and stale-data warnings.
@@ -97,6 +100,7 @@ Non-responsibilities:
 - ESI token handling.
 - Direct ESI calls.
 - Profit and fee calculations.
+- Liquidity and selection scoring.
 - Repricing logic.
 
 ### API
@@ -104,6 +108,7 @@ Non-responsibilities:
 Responsibilities:
 
 - Host local HTTP endpoints for the dashboard.
+- Resolve item lookup and market price lookup requests.
 - Handle EVE SSO login and callback.
 - Expose analyzed dashboard views.
 - Trigger and report sync jobs.
@@ -113,7 +118,7 @@ Responsibilities:
 
 Responsibilities:
 
-- Call EVE ESI endpoints.
+- Call public and authenticated EVE ESI endpoints.
 - Handle pagination, cache headers, retries, and ESI error responses.
 - Validate response shape.
 - Return normalized data to application services.
@@ -122,6 +127,8 @@ Responsibilities:
 
 Responsibilities:
 
+- Summarize Jita price state for an item.
+- Score item liquidity and selection quality.
 - Calculate net profit and margin.
 - Compare personal orders with market orders.
 - Classify orders by urgency and risk.
@@ -134,6 +141,7 @@ Domain code must be deterministic and testable without network or database acces
 Responsibilities:
 
 - Store authorized character metadata and encrypted or locally protected refresh credentials where practical.
+- Store candidate pools, watchlists, fee profiles, and app settings.
 - Store personal order snapshots.
 - Store market order snapshots for relevant Jita items.
 - Store sync attempts, cache metadata, and failure reasons.
@@ -144,7 +152,11 @@ Exact tables will be refined later, but the schema should include these concepts
 
 - `characters`
 - `auth_tokens`
-- `personal_order_snapshots`
+- `candidate_items`
+- `watchlist_items`
+- `fee_profiles`
+- `price_lookup_history`
+- `character_order_snapshots`
 - `market_order_snapshots`
 - `market_history_snapshots`
 - `item_types`
@@ -195,9 +207,10 @@ These items are intentionally left for later product design:
 When implementation begins, start with the smallest vertical slice:
 
 1. Create the monorepo structure.
-2. Add the domain package with tested money and order-analysis primitives.
-3. Add a stubbed API that returns fixture-based analyzed orders.
-4. Add the dashboard table against that API.
-5. Add EVE SSO and real ESI sync only after the local analysis workflow is visible.
+2. Add the domain package with tested price-state, spread, liquidity, and repricing primitives.
+3. Add a stubbed API that returns fixture-based market lookup, selection, and order-monitor views.
+4. Add the dashboard shell against that API.
+5. Add public ESI market sync for price lookup and selection discovery.
+6. Add EVE SSO and authenticated character-order sync after the public analysis workflow is visible.
 
 This sequence lets the project validate the merchant workflow before spending too much time on integration details.
