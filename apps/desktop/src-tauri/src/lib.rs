@@ -229,13 +229,13 @@ fn get_sync_status_with_source(source: MarketSource) -> Result<SyncStatus, Strin
 
 #[derive(Default)]
 struct CatalogServiceState {
-    service: OnceCell<Result<Arc<CatalogService>, String>>,
+    service: OnceCell<Arc<CatalogService>>,
 }
 
 impl CatalogServiceState {
     async fn get(&self) -> Result<Arc<CatalogService>, String> {
         self.service
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 let config = CatalogConfig::from_env().map_err(|error| error.to_string())?;
                 CatalogService::connect(config)
                     .await
@@ -243,7 +243,7 @@ impl CatalogServiceState {
                     .map_err(|error| error.to_string())
             })
             .await
-            .clone()
+            .map(Arc::clone)
     }
 }
 
@@ -401,5 +401,6 @@ mod tests {
         };
 
         assert_eq!(error, "EVETOOLS_DATABASE_URL is required");
+        assert!(state.service.get().is_none());
     }
 }

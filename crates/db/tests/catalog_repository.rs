@@ -137,3 +137,52 @@ async fn imports_and_searches_catalog_rows() {
     assert!(removed.is_none());
     assert!(removed_search.is_empty());
 }
+
+#[tokio::test]
+async fn importing_same_successful_build_returns_current_status_without_new_import_row() {
+    let Some(url) = database_url() else {
+        eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = connect_pool(&url).await.unwrap();
+    migrate_catalog_schema(&pool).await.unwrap();
+    let repository = CatalogRepository::new(pool.clone());
+    let archive = sample_archive();
+
+    let first_status = repository
+        .import_archive(ImportCatalogInput {
+            archive: &archive,
+            source_url: "test://same-build",
+        })
+        .await
+        .unwrap();
+    let import_count_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM evetools_catalog.sde_imports
+         WHERE build_number = $1 AND status = 'success'",
+    )
+    .bind(archive.metadata.build_number)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let second_status = repository
+        .import_archive(ImportCatalogInput {
+            archive: &archive,
+            source_url: "test://same-build",
+        })
+        .await
+        .unwrap();
+    let import_count_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM evetools_catalog.sde_imports
+         WHERE build_number = $1 AND status = 'success'",
+    )
+    .bind(archive.metadata.build_number)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(second_status, first_status);
+    assert_eq!(import_count_after, import_count_before);
+}

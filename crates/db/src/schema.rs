@@ -30,6 +30,34 @@ const CATALOG_SCHEMA_STATEMENTS: &[&str] = &[
         category_count BIGINT NOT NULL DEFAULT 0,
         market_group_count BIGINT NOT NULL DEFAULT 0
     )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_categories (
+        category_id INTEGER PRIMARY KEY,
+        published BOOLEAN NOT NULL,
+        name_en TEXT,
+        name_zh TEXT,
+        raw_name_json JSONB NOT NULL,
+        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
+    )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_groups (
+        group_id INTEGER PRIMARY KEY,
+        category_id INTEGER NOT NULL,
+        published BOOLEAN NOT NULL,
+        name_en TEXT,
+        name_zh TEXT,
+        raw_name_json JSONB NOT NULL,
+        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
+    )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.market_groups (
+        market_group_id INTEGER PRIMARY KEY,
+        parent_group_id INTEGER,
+        name_en TEXT,
+        name_zh TEXT,
+        description_en TEXT,
+        description_zh TEXT,
+        raw_name_json JSONB NOT NULL,
+        raw_description_json JSONB,
+        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
+    )"#,
     r#"CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_types (
         type_id INTEGER PRIMARY KEY,
         group_id INTEGER NOT NULL,
@@ -49,34 +77,42 @@ const CATALOG_SCHEMA_STATEMENTS: &[&str] = &[
         raw_description_json JSONB,
         updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
     )"#,
-    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_groups (
-        group_id INTEGER PRIMARY KEY,
-        category_id INTEGER NOT NULL,
-        published BOOLEAN NOT NULL,
-        name_en TEXT,
-        name_zh TEXT,
-        raw_name_json JSONB NOT NULL,
-        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
-    )"#,
-    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_categories (
-        category_id INTEGER PRIMARY KEY,
-        published BOOLEAN NOT NULL,
-        name_en TEXT,
-        name_zh TEXT,
-        raw_name_json JSONB NOT NULL,
-        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
-    )"#,
-    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.market_groups (
-        market_group_id INTEGER PRIMARY KEY,
-        parent_group_id INTEGER,
-        name_en TEXT,
-        name_zh TEXT,
-        description_en TEXT,
-        description_zh TEXT,
-        raw_name_json JSONB NOT NULL,
-        raw_description_json JSONB,
-        updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id)
-    )"#,
+    r#"DO $$
+    BEGIN
+        ALTER TABLE evetools_catalog.inventory_groups
+            ADD CONSTRAINT fk_inventory_groups_category_id
+            FOREIGN KEY (category_id)
+            REFERENCES evetools_catalog.inventory_categories(category_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$"#,
+    r#"DO $$
+    BEGIN
+        ALTER TABLE evetools_catalog.market_groups
+            ADD CONSTRAINT fk_market_groups_parent_group_id
+            FOREIGN KEY (parent_group_id)
+            REFERENCES evetools_catalog.market_groups(market_group_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$"#,
+    r#"DO $$
+    BEGIN
+        ALTER TABLE evetools_catalog.inventory_types
+            ADD CONSTRAINT fk_inventory_types_group_id
+            FOREIGN KEY (group_id)
+            REFERENCES evetools_catalog.inventory_groups(group_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$"#,
+    r#"DO $$
+    BEGIN
+        ALTER TABLE evetools_catalog.inventory_types
+            ADD CONSTRAINT fk_inventory_types_market_group_id
+            FOREIGN KEY (market_group_id)
+            REFERENCES evetools_catalog.market_groups(market_group_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$"#,
     r#"CREATE INDEX IF NOT EXISTS idx_evetools_inventory_types_name_en
         ON evetools_catalog.inventory_types(name_en)"#,
     r#"CREATE INDEX IF NOT EXISTS idx_evetools_inventory_types_name_zh
@@ -84,3 +120,57 @@ const CATALOG_SCHEMA_STATEMENTS: &[&str] = &[
     r#"CREATE INDEX IF NOT EXISTS idx_evetools_inventory_types_market_group
         ON evetools_catalog.inventory_types(market_group_id)"#,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creates_parent_catalog_tables_before_child_tables() {
+        let categories =
+            statement_index("CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_categories");
+        let groups =
+            statement_index("CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_groups");
+        let market_groups =
+            statement_index("CREATE TABLE IF NOT EXISTS evetools_catalog.market_groups");
+        let types = statement_index("CREATE TABLE IF NOT EXISTS evetools_catalog.inventory_types");
+
+        assert!(categories < groups);
+        assert!(groups < market_groups);
+        assert!(market_groups < types);
+    }
+
+    #[test]
+    fn adds_core_sde_foreign_keys_as_deferred_constraints() {
+        assert_schema_contains("fk_inventory_groups_category_id");
+        assert_schema_contains("FOREIGN KEY (category_id)");
+        assert_schema_contains("REFERENCES evetools_catalog.inventory_categories(category_id)");
+        assert_schema_contains("fk_inventory_types_group_id");
+        assert_schema_contains("FOREIGN KEY (group_id)");
+        assert_schema_contains("REFERENCES evetools_catalog.inventory_groups(group_id)");
+        assert_schema_contains("fk_inventory_types_market_group_id");
+        assert_schema_contains("FOREIGN KEY (market_group_id)");
+        assert_schema_contains("REFERENCES evetools_catalog.market_groups(market_group_id)");
+        assert_schema_contains("fk_market_groups_parent_group_id");
+        assert_schema_contains("FOREIGN KEY (parent_group_id)");
+        assert_schema_contains("REFERENCES evetools_catalog.market_groups(market_group_id)");
+        assert_schema_contains("DEFERRABLE INITIALLY DEFERRED");
+        assert_schema_contains("EXCEPTION WHEN duplicate_object THEN NULL");
+    }
+
+    fn statement_index(needle: &str) -> usize {
+        CATALOG_SCHEMA_STATEMENTS
+            .iter()
+            .position(|statement| statement.contains(needle))
+            .expect("schema statement should exist")
+    }
+
+    fn assert_schema_contains(needle: &str) {
+        assert!(
+            CATALOG_SCHEMA_STATEMENTS
+                .iter()
+                .any(|statement| statement.contains(needle)),
+            "schema statements should contain {needle}"
+        );
+    }
+}

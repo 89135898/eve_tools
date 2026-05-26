@@ -93,6 +93,12 @@ export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
 
 Do not commit real database URLs or passwords. If a credential is pasted into chat, logs, or source control, rotate it in Supabase before use.
 
+Direct Supabase Postgres mode is only for local, private, or admin catalog imports.
+`EVETOOLS_DATABASE_URL` is a privileged credential: do not bundle it into the Tauri app,
+inject it for end users, or require end users to hold it. Before production distribution,
+replace direct database access with a hosted API, Supabase Edge Function, or a strictly
+RLS-enforced read-only path.
+
 The first catalog slice imports:
 
 - `_sde.jsonl`

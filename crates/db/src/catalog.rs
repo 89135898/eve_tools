@@ -85,6 +85,13 @@ impl CatalogRepository {
             .execute(&mut *tx)
             .await?;
 
+        if let Some(build_number) = input.archive.metadata.build_number {
+            if let Some(status) = latest_success_status_for_build(&mut tx, build_number).await? {
+                tx.commit().await?;
+                return Ok(status);
+            }
+        }
+
         let import_id: i64 = sqlx::query_scalar(
             "INSERT INTO evetools_catalog.sde_imports
                 (build_number, release_date, source_url, started_at, status)
@@ -227,6 +234,29 @@ fn not_imported_status() -> CatalogStatus {
         category_count: 0,
         market_group_count: 0,
     }
+}
+
+async fn latest_success_status_for_build(
+    tx: &mut Transaction<'_, Postgres>,
+    build_number: i32,
+) -> Result<Option<CatalogStatus>, sqlx::Error> {
+    let row = sqlx::query_as::<_, CatalogStatusRecord>(
+        "SELECT status, build_number, release_date, source_url, completed_at, error_summary,
+                type_count, group_count, category_count, market_group_count
+         FROM evetools_catalog.sde_imports
+         ORDER BY import_id DESC
+         LIMIT 1",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.0 != "success" || row.1 != Some(build_number) {
+        return Ok(None);
+    }
+    Ok(Some(catalog_status_from_record(row)))
 }
 
 const TYPE_SELECT_SQL: &str = "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
