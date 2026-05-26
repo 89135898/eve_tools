@@ -8,7 +8,5 @@ rust-version.workspace = true
 [dependencies]
 evetools-db = { path = "../db" }
 evetools-sde = { path = "../sde" }
-serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-tokio.workspace = true

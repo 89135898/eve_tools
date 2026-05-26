@@ -3,11 +3,24 @@ use evetools_db::{
     InventoryTypeView,
 };
 use evetools_sde::{read_catalog_archive_from_bytes, SdeClient};
+use std::fmt;
 use thiserror::Error;
 
-#[derive(Clone, Debug)]
+const OFFICIAL_SDE_ARCHIVE_URL: &str =
+    "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
+
+#[derive(Clone)]
 pub struct CatalogConfig {
     pub database_url: String,
+}
+
+impl fmt::Debug for CatalogConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogConfig")
+            .field("database_url", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -38,6 +51,7 @@ impl CatalogConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct CatalogService {
     repository: CatalogRepository,
 }
@@ -57,13 +71,21 @@ impl CatalogService {
 
     pub async fn import_latest(&self) -> Result<CatalogStatus, CatalogServiceError> {
         let client = SdeClient::official()?;
+        let latest_metadata = client.latest_metadata().await?;
+        let current_status = self.status().await?;
+        if current_status.status == "success"
+            && current_status.build_number == Some(latest_metadata.build_number)
+        {
+            return Ok(current_status);
+        }
+
         let bytes = client.download_latest_archive().await?;
         let archive = read_catalog_archive_from_bytes(bytes)?;
         Ok(self
             .repository
             .import_archive(ImportCatalogInput {
                 archive: &archive,
-                source_url: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip",
+                source_url: OFFICIAL_SDE_ARCHIVE_URL,
             })
             .await?)
     }
@@ -85,6 +107,9 @@ impl CatalogService {
         type_id: i32,
         language: &str,
     ) -> Result<Option<InventoryTypeView>, CatalogServiceError> {
-        Ok(self.repository.get_inventory_type(type_id, language).await?)
+        Ok(self
+            .repository
+            .get_inventory_type(type_id, language)
+            .await?)
     }
 }

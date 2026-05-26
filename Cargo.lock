@@ -1033,10 +1033,8 @@ version = "0.1.0"
 dependencies = [
  "evetools-db",
  "evetools-sde",
- "serde",
  "sqlx",
  "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
