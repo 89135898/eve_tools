@@ -38,12 +38,12 @@ export default function App() {
     setLoadState("loading");
     setError(null);
     try {
-      const [lookupResult, candidateResult, orderResult, statusResult] = await Promise.all([
+      const [lookupResult, candidateResult, orderResult] = await Promise.all([
         lookupMarketPrice(query),
         listSelectionCandidates(),
-        listOrderMonitorItems(),
-        getSyncStatus()
+        listOrderMonitorItems()
       ]);
+      const statusResult = await getSyncStatus();
       setLookup(lookupResult);
       setCandidates(candidateResult);
       setOrders(orderResult);
@@ -90,7 +90,7 @@ export default function App() {
       <section className="status-row">
         <StatusCard label={t("statusCards.publicMarketSync")} value={code("codes.syncStatus", syncStatus?.public_market_sync)} />
         <StatusCard label={t("statusCards.orderSync")} value={code("codes.syncStatus", syncStatus?.authenticated_order_sync)} />
-        <StatusCard label={t("statusCards.dataSource")} value={code("codes.dataSource", "fixture")} />
+        <StatusCard label={t("statusCards.dataSource")} value={code("codes.dataSource", syncStatus?.data_source)} />
       </section>
 
       {error && <div className="error-banner">{error}</div>}

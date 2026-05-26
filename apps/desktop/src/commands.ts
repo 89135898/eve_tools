@@ -44,6 +44,7 @@ export type OrderMonitorView = {
 export type SyncStatus = {
   public_market_sync: string;
   authenticated_order_sync: string;
+  data_source: string;
 };
 
 export function lookupMarketPrice(query: string): Promise<MarketLookupView> {

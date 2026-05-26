@@ -57,11 +57,21 @@ export const resources = {
       codes: {
         syncStatus: {
           "fixture-ready": "测试数据就绪",
+          "fixture-fallback": "测试数据回退",
+          "live-ready": "实时 ESI 就绪",
           "not-authorized": "未授权",
           unknown: "未知"
         },
         dataSource: {
-          fixture: "测试数据"
+          fixture: "测试数据",
+          live: "实时 ESI",
+          unknown: "未知"
+        },
+        trend: {
+          up: "上涨",
+          down: "下跌",
+          stable: "稳定",
+          unknown: "未知"
         },
         dataQuality: {
           fresh: "新鲜",
@@ -84,6 +94,10 @@ export const resources = {
           deep_top_book: "盘口深度充足",
           acceptable_spread: "价差可接受",
           moderate_velocity: "成交速度适中",
+          sparse_market_data: "市场数据稀疏",
+          missing_market_side: "缺少单侧盘口",
+          stale_market_data: "市场数据过期",
+          negative_net_profit: "预估净收益为负",
           undercut_detected: "检测到被压价",
           high_velocity_item: "高流动性物品",
           overbid_detected: "检测到被超价"
@@ -147,11 +161,21 @@ export const resources = {
       codes: {
         syncStatus: {
           "fixture-ready": "Fixture ready",
+          "fixture-fallback": "Fixture fallback",
+          "live-ready": "Live ESI ready",
           "not-authorized": "Not authorized",
           unknown: "Unknown"
         },
         dataSource: {
-          fixture: "Fixture"
+          fixture: "Fixture",
+          live: "Live ESI",
+          unknown: "Unknown"
+        },
+        trend: {
+          up: "Up",
+          down: "Down",
+          stable: "Stable",
+          unknown: "Unknown"
         },
         dataQuality: {
           fresh: "Fresh",
@@ -174,6 +198,10 @@ export const resources = {
           deep_top_book: "Deep top book",
           acceptable_spread: "Acceptable spread",
           moderate_velocity: "Moderate velocity",
+          sparse_market_data: "Sparse market data",
+          missing_market_side: "Missing one side of book",
+          stale_market_data: "Stale market data",
+          negative_net_profit: "Estimated net profit is negative",
           undercut_detected: "Undercut detected",
           high_velocity_item: "High velocity item",
           overbid_detected: "Overbid detected"
