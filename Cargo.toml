@@ -4,7 +4,8 @@ members = [
   "crates/domain",
   "crates/esi",
   "crates/db",
-  "crates/worker"
+  "crates/worker",
+  "apps/desktop/src-tauri"
 ]
 
 [workspace.package]

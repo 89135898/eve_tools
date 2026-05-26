@@ -1,0 +1,20 @@
+[package]
+name = "evetools-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "evetools_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+evetools-domain = { path = "../../../crates/domain" }
+evetools-worker = { path = "../../../crates/worker" }
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true

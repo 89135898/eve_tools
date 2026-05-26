@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EveTools",
+  "version": "0.1.0",
+  "identifier": "com.evetools.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm vite:dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm vite:build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "EVE Trader Assistant",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 720
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
