@@ -62,9 +62,11 @@ The importer should read these SDE files from the JSONL zip:
 
 Expected catalog fields:
 
+The JSONL files use `_key` as the row's canonical ID. The importer should normalize `_key` into the app schema's `type_id`, `group_id`, `category_id`, and `market_group_id` fields. If a future SDE row also carries an explicit ID field such as `typeID`, the importer should validate that it matches `_key` and prefer `_key`.
+
 ### Types
 
-- `typeID`
+- `_key` as `type_id`
 - `name`
 - `description`
 - `groupID`
@@ -79,20 +81,20 @@ Expected catalog fields:
 
 ### Groups
 
-- `groupID`
+- `_key` as `group_id`
 - `categoryID`
 - `name`
 - `published`
 
 ### Categories
 
-- `categoryID`
+- `_key` as `category_id`
 - `name`
 - `published`
 
 ### Market Groups
 
-- `marketGroupID`
+- `_key` as `market_group_id`
 - `parentGroupID`
 - `name`
 - `description`
