@@ -9,5 +9,6 @@ rust-version.workspace = true
 evetools-db = { path = "../db" }
 evetools-sde = { path = "../sde" }
 serde.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
