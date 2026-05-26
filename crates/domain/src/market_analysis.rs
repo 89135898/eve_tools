@@ -1,6 +1,6 @@
 use crate::{
-    DataQuality, FeeProfile, JITA_4_4_STATION_ID, OrderBookSummary, attention_score,
-    liquidity_score, net_profit,
+    attention_score, liquidity_score, net_profit, DataQuality, FeeProfile, OrderBookSummary,
+    JITA_4_4_STATION_ID,
 };
 use rust_decimal::Decimal;
 
@@ -133,7 +133,10 @@ pub struct CandidateAnalysis {
     pub reason_codes: Vec<String>,
 }
 
-pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -> CandidateAnalysis {
+pub fn build_selection_candidate(
+    summary: &OrderBookSummary,
+    fee: &FeeProfile,
+) -> CandidateAnalysis {
     let one_cent = Decimal::new(1, 2);
     let recommended_entry_price = if summary.best_bid > Decimal::ZERO {
         summary.best_bid + one_cent
@@ -162,8 +165,12 @@ pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -
     let top_depth = summary.top_buy_depth.min(summary.top_sell_depth);
     let liquidity_score_value = liquidity_score(summary.daily_volume, top_depth);
     let attention_score_value = attention_score(net_margin_pct, summary.daily_volume, top_depth);
-    let reason_codes =
-        candidate_reason_codes(summary, net_profit_value, summary.spread_percent(), top_depth);
+    let reason_codes = candidate_reason_codes(
+        summary,
+        net_profit_value,
+        summary.spread_percent(),
+        top_depth,
+    );
     let confidence_score_value = confidence_score(summary, liquidity_score_value, net_profit_value);
 
     CandidateAnalysis {
@@ -179,7 +186,11 @@ pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -
     }
 }
 
-fn confidence_score(summary: &OrderBookSummary, liquidity_score: u8, net_profit_value: Decimal) -> u8 {
+fn confidence_score(
+    summary: &OrderBookSummary,
+    liquidity_score: u8,
+    net_profit_value: Decimal,
+) -> u8 {
     let quality_score = match summary.data_quality() {
         DataQuality::Fresh => 100u16,
         DataQuality::Sparse => 45u16,
@@ -257,7 +268,13 @@ mod tests {
             order(34, true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
             order(34, true, Decimal::new(501, 2), 125_000, JITA_4_4_STATION_ID),
             order(34, true, Decimal::new(502, 2), 999_000, 60008494),
-            order(34, false, Decimal::new(549, 2), 620_000, JITA_4_4_STATION_ID),
+            order(
+                34,
+                false,
+                Decimal::new(549, 2),
+                620_000,
+                JITA_4_4_STATION_ID,
+            ),
             order(34, false, Decimal::new(549, 2), 30_000, JITA_4_4_STATION_ID),
             order(34, false, Decimal::new(548, 2), 900_000, 60008494),
         ];
@@ -274,13 +291,8 @@ mod tests {
             },
         ];
 
-        let summary = summarize_jita_market(
-            34,
-            "Tritanium",
-            &orders,
-            &history,
-            "2026-05-25T12:00:00Z",
-        );
+        let summary =
+            summarize_jita_market(34, "Tritanium", &orders, &history, "2026-05-25T12:00:00Z");
 
         assert_eq!(summary.type_id, 34);
         assert_eq!(summary.item_name, "Tritanium");
@@ -301,13 +313,7 @@ mod tests {
             10,
             JITA_4_4_STATION_ID,
         )];
-        let summary = summarize_jita_market(
-            34,
-            "Tritanium",
-            &orders,
-            &[],
-            "2026-05-25T12:00:00Z",
-        );
+        let summary = summarize_jita_market(34, "Tritanium", &orders, &[], "2026-05-25T12:00:00Z");
 
         assert_eq!(summary.best_bid, Decimal::new(501, 2));
         assert_eq!(summary.best_ask, Decimal::ZERO);
@@ -381,18 +387,30 @@ mod tests {
     fn ignores_other_type_orders_even_at_same_station() {
         let orders = vec![
             order(34, true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
-            order(34, false, Decimal::new(549, 2), 620_000, JITA_4_4_STATION_ID),
-            order(35, true, Decimal::new(999, 2), 9_999_999, JITA_4_4_STATION_ID),
-            order(35, false, Decimal::new(100, 2), 8_888_888, JITA_4_4_STATION_ID),
+            order(
+                34,
+                false,
+                Decimal::new(549, 2),
+                620_000,
+                JITA_4_4_STATION_ID,
+            ),
+            order(
+                35,
+                true,
+                Decimal::new(999, 2),
+                9_999_999,
+                JITA_4_4_STATION_ID,
+            ),
+            order(
+                35,
+                false,
+                Decimal::new(100, 2),
+                8_888_888,
+                JITA_4_4_STATION_ID,
+            ),
         ];
 
-        let summary = summarize_jita_market(
-            34,
-            "Tritanium",
-            &orders,
-            &[],
-            "2026-05-25T12:00:00Z",
-        );
+        let summary = summarize_jita_market(34, "Tritanium", &orders, &[], "2026-05-25T12:00:00Z");
 
         assert_eq!(summary.best_bid, Decimal::new(501, 2));
         assert_eq!(summary.best_ask, Decimal::new(549, 2));
@@ -427,7 +445,9 @@ mod tests {
         assert!(candidate
             .reason_codes
             .contains(&"high_daily_volume".to_string()));
-        assert!(candidate.reason_codes.contains(&"deep_top_book".to_string()));
+        assert!(candidate
+            .reason_codes
+            .contains(&"deep_top_book".to_string()));
     }
 
     #[test]
@@ -542,8 +562,10 @@ mod tests {
             order_modification_fee: Decimal::new(100, 2),
         };
 
-        let missing = build_selection_candidate(&missing_summary, &FeeProfile::conservative_default());
-        let moderate = build_selection_candidate(&moderate_summary, &FeeProfile::conservative_default());
+        let missing =
+            build_selection_candidate(&missing_summary, &FeeProfile::conservative_default());
+        let moderate =
+            build_selection_candidate(&moderate_summary, &FeeProfile::conservative_default());
         let acceptable = build_selection_candidate(&acceptable_spread_summary, &heavy_fee);
 
         assert!(missing
