@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   getSyncStatus,
   listOrderMonitorItems,
@@ -9,10 +10,12 @@ import {
   type SelectionCandidateView,
   type SyncStatus
 } from "./commands";
+import { supportedLanguages, translateCode, type SupportedLanguage } from "./i18n";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
 export default function App() {
+  const { i18n, t } = useTranslation();
   const [query, setQuery] = useState("Tritanium");
   const [lookup, setLookup] = useState<MarketLookupView | null>(null);
   const [candidates, setCandidates] = useState<SelectionCandidateView[]>([]);
@@ -20,6 +23,16 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const language = i18n.resolvedLanguage as SupportedLanguage;
+  const numberFormatter = new Intl.NumberFormat(language);
+
+  function code(prefix: string, value: string | undefined) {
+    return translateCode(prefix, value ?? "unknown", t);
+  }
+
+  function formatReasons(reasonCodes: string[]) {
+    return reasonCodes.map((reasonCode) => code("codes.reason", reasonCode)).join(", ");
+  }
 
   async function refresh() {
     setLoadState("loading");
@@ -50,43 +63,59 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <h1>EVE Trader Assistant</h1>
-          <p>Jita 4-4 station trading cockpit</p>
+          <h1>{t("app.title")}</h1>
+          <p>{t("app.subtitle")}</p>
         </div>
-        <button type="button" onClick={() => void refresh()} disabled={loadState === "loading"}>
-          {loadState === "loading" ? "Refreshing" : "Refresh"}
-        </button>
+        <div className="topbar-actions">
+          <label className="language-select">
+            <span>{t("language.label")}</span>
+            <select
+              value={language}
+              onChange={(event) => void i18n.changeLanguage(event.target.value)}
+              aria-label={t("language.label")}
+            >
+              {supportedLanguages.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {t(option.labelKey)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" onClick={() => void refresh()} disabled={loadState === "loading"}>
+            {loadState === "loading" ? t("actions.refreshing") : t("actions.refresh")}
+          </button>
+        </div>
       </header>
 
       <section className="status-row">
-        <StatusCard label="Public market sync" value={syncStatus?.public_market_sync ?? "unknown"} />
-        <StatusCard label="Order sync" value={syncStatus?.authenticated_order_sync ?? "unknown"} />
-        <StatusCard label="Data source" value="fixture" />
+        <StatusCard label={t("statusCards.publicMarketSync")} value={code("codes.syncStatus", syncStatus?.public_market_sync)} />
+        <StatusCard label={t("statusCards.orderSync")} value={code("codes.syncStatus", syncStatus?.authenticated_order_sync)} />
+        <StatusCard label={t("statusCards.dataSource")} value={code("codes.dataSource", "fixture")} />
       </section>
 
       {error && <div className="error-banner">{error}</div>}
 
       <section className="panel lookup-panel">
         <div className="panel-header">
-          <h2>Market Price Lookup</h2>
+          <h2>{t("lookup.title")}</h2>
           <form
             onSubmit={(event) => {
               event.preventDefault();
               void refresh();
             }}
           >
-            <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Item query" />
-            <button type="submit">Lookup</button>
+            <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t("lookup.itemQuery")} />
+            <button type="submit">{t("actions.lookup")}</button>
           </form>
         </div>
         {lookup && (
           <div className="metric-grid">
-            <Metric label="Item" value={lookup.item_name} />
-            <Metric label="Best bid" value={lookup.best_bid} />
-            <Metric label="Best ask" value={lookup.best_ask} />
-            <Metric label="Spread" value={`${lookup.spread} (${lookup.spread_percent}%)`} />
-            <Metric label="Daily volume" value={lookup.daily_volume.toLocaleString()} />
-            <Metric label="Data quality" value={lookup.data_quality} />
+            <Metric label={t("lookup.item")} value={lookup.item_name} />
+            <Metric label={t("lookup.bestBid")} value={lookup.best_bid} />
+            <Metric label={t("lookup.bestAsk")} value={lookup.best_ask} />
+            <Metric label={t("lookup.spread")} value={`${lookup.spread} (${lookup.spread_percent}%)`} />
+            <Metric label={t("lookup.dailyVolume")} value={numberFormatter.format(lookup.daily_volume)} />
+            <Metric label={t("lookup.dataQuality")} value={code("codes.dataQuality", lookup.data_quality)} />
           </div>
         )}
       </section>
@@ -94,18 +123,18 @@ export default function App() {
       <section className="dashboard-grid">
         <section className="panel">
           <div className="panel-header">
-            <h2>Selection Discovery</h2>
-            <span>{candidates.length} candidates</span>
+            <h2>{t("selection.title")}</h2>
+            <span>{t("selection.count", { count: candidates.length })}</span>
           </div>
           <table>
             <thead>
               <tr>
-                <th>Item</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>Net</th>
-                <th>Attention</th>
-                <th>Reasons</th>
+                <th>{t("selection.item")}</th>
+                <th>{t("selection.entry")}</th>
+                <th>{t("selection.exit")}</th>
+                <th>{t("selection.net")}</th>
+                <th>{t("selection.attention")}</th>
+                <th>{t("selection.reasons")}</th>
               </tr>
             </thead>
             <tbody>
@@ -115,8 +144,8 @@ export default function App() {
                   <td>{candidate.recommended_entry_price}</td>
                   <td>{candidate.recommended_exit_price}</td>
                   <td>{candidate.net_profit}</td>
-                  <td>{candidate.attention_score}</td>
-                  <td>{candidate.reason_codes.join(", ")}</td>
+                  <td>{numberFormatter.format(candidate.attention_score)}</td>
+                  <td>{formatReasons(candidate.reason_codes)}</td>
                 </tr>
               ))}
             </tbody>
@@ -125,29 +154,33 @@ export default function App() {
 
         <section className="panel">
           <div className="panel-header">
-            <h2>Order Monitor</h2>
-            <span>{orders.length} orders</span>
+            <h2>{t("orders.title")}</h2>
+            <span>{t("orders.count", { count: orders.length })}</span>
           </div>
           <table>
             <thead>
               <tr>
-                <th>Item</th>
-                <th>Side</th>
-                <th>Current</th>
-                <th>Leader</th>
-                <th>Recommended</th>
-                <th>Urgency</th>
+                <th>{t("orders.item")}</th>
+                <th>{t("orders.side")}</th>
+                <th>{t("orders.current")}</th>
+                <th>{t("orders.leader")}</th>
+                <th>{t("orders.recommended")}</th>
+                <th>{t("orders.action")}</th>
+                <th>{t("orders.urgency")}</th>
+                <th>{t("orders.reasons")}</th>
               </tr>
             </thead>
             <tbody>
               {orders.map((order) => (
                 <tr key={order.order_id}>
                   <td>{order.item_name}</td>
-                  <td>{order.side}</td>
+                  <td>{code("codes.side", order.side)}</td>
                   <td>{order.current_price}</td>
                   <td>{order.market_leader_price}</td>
                   <td>{order.recommended_price}</td>
-                  <td>{order.urgency_score}</td>
+                  <td>{code("codes.action", order.recommended_action)}</td>
+                  <td>{numberFormatter.format(order.urgency_score)}</td>
+                  <td>{formatReasons(order.reason_codes)}</td>
                 </tr>
               ))}
             </tbody>
