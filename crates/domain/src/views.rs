@@ -1,6 +1,5 @@
 use crate::{DataQuality, OrderBookSummary, PriceTrend};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +47,7 @@ pub struct OrderMonitorView {
 }
 
 fn format_isk(value: Decimal) -> String {
-    format!("{:.2}", value.round_dp(2).to_f64().unwrap_or(0.0))
+    value.round_dp(2).to_string()
 }
 
 fn data_quality_code(value: DataQuality) -> &'static str {

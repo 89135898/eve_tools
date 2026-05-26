@@ -36,12 +36,14 @@ impl PriceTrend {
 
 pub fn summarize_jita_market(
     type_id: i32,
-    item_name: &str,
+    item_name: impl Into<String>,
     orders: &[PublicMarketOrder],
     history: &[PublicMarketHistoryDay],
-    last_synced_at: &str,
+    last_synced_at: impl Into<String>,
 ) -> OrderBookSummary {
-    let jita_orders = orders.iter().filter(|order| order.location_id == JITA_4_4_STATION_ID);
+    let jita_orders = orders
+        .iter()
+        .filter(|order| order.location_id == JITA_4_4_STATION_ID && order.type_id == type_id);
 
     let best_bid = jita_orders
         .clone()
@@ -81,13 +83,13 @@ pub fn summarize_jita_market(
 
     OrderBookSummary {
         type_id,
-        item_name: item_name.to_string(),
+        item_name: item_name.into(),
         best_bid,
         best_ask,
         daily_volume,
         top_buy_depth,
         top_sell_depth,
-        last_synced_at: last_synced_at.to_string(),
+        last_synced_at: last_synced_at.into(),
     }
 }
 
@@ -122,13 +124,14 @@ mod tests {
     use rust_decimal::Decimal;
 
     fn order(
+        type_id: i32,
         is_buy_order: bool,
         price: Decimal,
         volume_remain: u64,
         location_id: i64,
     ) -> PublicMarketOrder {
         PublicMarketOrder {
-            type_id: 34,
+            type_id,
             location_id,
             is_buy_order,
             price,
@@ -139,12 +142,12 @@ mod tests {
     #[test]
     fn summarizes_jita_top_of_book_and_ignores_other_locations() {
         let orders = vec![
-            order(true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
-            order(true, Decimal::new(501, 2), 125_000, JITA_4_4_STATION_ID),
-            order(true, Decimal::new(502, 2), 999_000, 60008494),
-            order(false, Decimal::new(549, 2), 620_000, JITA_4_4_STATION_ID),
-            order(false, Decimal::new(549, 2), 30_000, JITA_4_4_STATION_ID),
-            order(false, Decimal::new(548, 2), 900_000, 60008494),
+            order(34, true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
+            order(34, true, Decimal::new(501, 2), 125_000, JITA_4_4_STATION_ID),
+            order(34, true, Decimal::new(502, 2), 999_000, 60008494),
+            order(34, false, Decimal::new(549, 2), 620_000, JITA_4_4_STATION_ID),
+            order(34, false, Decimal::new(549, 2), 30_000, JITA_4_4_STATION_ID),
+            order(34, false, Decimal::new(548, 2), 900_000, 60008494),
         ];
         let history = vec![
             PublicMarketHistoryDay {
@@ -179,7 +182,13 @@ mod tests {
 
     #[test]
     fn marks_missing_when_jita_lacks_one_side() {
-        let orders = vec![order(true, Decimal::new(501, 2), 10, JITA_4_4_STATION_ID)];
+        let orders = vec![order(
+            34,
+            true,
+            Decimal::new(501, 2),
+            10,
+            JITA_4_4_STATION_ID,
+        )];
         let summary = summarize_jita_market(
             34,
             "Tritanium",
@@ -254,5 +263,28 @@ mod tests {
 
         assert_eq!(classify_price_trend(&up_exactly), PriceTrend::Stable);
         assert_eq!(classify_price_trend(&down_exactly), PriceTrend::Stable);
+    }
+
+    #[test]
+    fn ignores_other_type_orders_even_at_same_station() {
+        let orders = vec![
+            order(34, true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
+            order(34, false, Decimal::new(549, 2), 620_000, JITA_4_4_STATION_ID),
+            order(35, true, Decimal::new(999, 2), 9_999_999, JITA_4_4_STATION_ID),
+            order(35, false, Decimal::new(100, 2), 8_888_888, JITA_4_4_STATION_ID),
+        ];
+
+        let summary = summarize_jita_market(
+            34,
+            "Tritanium",
+            &orders,
+            &[],
+            "2026-05-25T12:00:00Z",
+        );
+
+        assert_eq!(summary.best_bid, Decimal::new(501, 2));
+        assert_eq!(summary.best_ask, Decimal::new(549, 2));
+        assert_eq!(summary.top_buy_depth, 500_000);
+        assert_eq!(summary.top_sell_depth, 620_000);
     }
 }
