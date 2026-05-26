@@ -78,6 +78,22 @@ impl MarketLookupView {
     }
 }
 
+impl SelectionCandidateView {
+    pub fn from_analysis(analysis: crate::CandidateAnalysis) -> Self {
+        Self {
+            type_id: analysis.type_id,
+            item_name: analysis.item_name,
+            recommended_entry_price: format_isk(analysis.recommended_entry_price),
+            recommended_exit_price: format_isk(analysis.recommended_exit_price),
+            net_profit: format_isk(analysis.net_profit),
+            attention_score: analysis.attention_score,
+            liquidity_score: analysis.liquidity_score,
+            confidence_score: analysis.confidence_score,
+            reason_codes: analysis.reason_codes,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +121,27 @@ mod tests {
         assert_eq!(view.spread_percent, "9.58");
         assert_eq!(view.price_trend, "up");
         assert_eq!(view.data_quality, "fresh");
+    }
+
+    #[test]
+    fn selection_candidate_view_formats_analysis_values() {
+        let analysis = crate::CandidateAnalysis {
+            type_id: 34,
+            item_name: "Tritanium".to_string(),
+            recommended_entry_price: Decimal::new(502, 2),
+            recommended_exit_price: Decimal::new(548, 2),
+            net_profit: Decimal::new(20, 2),
+            attention_score: 82,
+            liquidity_score: 96,
+            confidence_score: 88,
+            reason_codes: vec!["healthy_spread".to_string()],
+        };
+
+        let view = SelectionCandidateView::from_analysis(analysis);
+
+        assert_eq!(view.recommended_entry_price, "5.02");
+        assert_eq!(view.recommended_exit_price, "5.48");
+        assert_eq!(view.net_profit, "0.20");
+        assert_eq!(view.reason_codes, vec!["healthy_spread"]);
     }
 }
