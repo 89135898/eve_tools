@@ -106,9 +106,9 @@ pub fn classify_price_trend(history: &[PublicMarketHistoryDay]) -> PriceTrend {
     let one_percent = Decimal::new(1, 2);
     let change_ratio = (current - previous) / previous;
 
-    if change_ratio >= one_percent {
+    if change_ratio > one_percent {
         PriceTrend::Up
-    } else if change_ratio <= -one_percent {
+    } else if change_ratio < -one_percent {
         PriceTrend::Down
     } else {
         PriceTrend::Stable
@@ -223,5 +223,36 @@ mod tests {
         assert_eq!(classify_price_trend(&stable), PriceTrend::Stable);
         assert_eq!(classify_price_trend(&down), PriceTrend::Down);
         assert_eq!(classify_price_trend(&[]), PriceTrend::Stable);
+    }
+
+    #[test]
+    fn price_trend_treats_exactly_one_percent_as_stable() {
+        let up_exactly = vec![
+            PublicMarketHistoryDay {
+                average: Decimal::new(10000, 2),
+                date: "2026-05-24".to_string(),
+                volume: 100,
+            },
+            PublicMarketHistoryDay {
+                average: Decimal::new(10100, 2),
+                date: "2026-05-25".to_string(),
+                volume: 100,
+            },
+        ];
+        let down_exactly = vec![
+            PublicMarketHistoryDay {
+                average: Decimal::new(10000, 2),
+                date: "2026-05-24".to_string(),
+                volume: 100,
+            },
+            PublicMarketHistoryDay {
+                average: Decimal::new(9900, 2),
+                date: "2026-05-25".to_string(),
+                volume: 100,
+            },
+        ];
+
+        assert_eq!(classify_price_trend(&up_exactly), PriceTrend::Stable);
+        assert_eq!(classify_price_trend(&down_exactly), PriceTrend::Stable);
     }
 }
