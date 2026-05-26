@@ -1,7 +1,10 @@
 use serde::Deserialize;
+use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const LATEST_METADATA_PATH: &str = "/static-data/tranquility/latest.jsonl";
 const LATEST_ARCHIVE_PATH: &str = "/static-data/eve-online-static-data-latest-jsonl.zip";
 
@@ -40,10 +43,27 @@ pub struct SdeClient {
 
 impl SdeClient {
     pub fn new(base_url: impl AsRef<str>) -> Result<Self, SdeClientError> {
+        Self::with_timeouts(base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_request_timeout(
+        base_url: impl AsRef<str>,
+        request_timeout: Duration,
+    ) -> Result<Self, SdeClientError> {
+        Self::with_timeouts(base_url, DEFAULT_CONNECT_TIMEOUT, request_timeout)
+    }
+
+    pub fn with_timeouts(
+        base_url: impl AsRef<str>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, SdeClientError> {
         Ok(Self {
             base_url: Url::parse(base_url.as_ref())?,
             http: reqwest::Client::builder()
                 .user_agent("EveTools SDE importer")
+                .connect_timeout(connect_timeout)
+                .timeout(request_timeout)
                 .build()?,
         })
     }
