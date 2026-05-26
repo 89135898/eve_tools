@@ -4,15 +4,23 @@ Date: 2026-05-26
 
 ## Purpose
 
-Add a local EVE static catalog that can power item search, localization, item filtering, and market recommendation display without relying on one ESI metadata request per item.
+Add an EVE static catalog service that imports CCP's official Static Data Export (SDE) into Supabase Postgres and exposes item search, localization, market eligibility, and type lookup through Rust service APIs.
 
-This is a prerequisite for NPC Hub Selection Discovery. Discovery will receive large sets of `type_id` values from public market orders; the app needs local metadata to turn those IDs into useful, filterable recommendations.
+This is a prerequisite for NPC Hub Selection Discovery. Discovery receives large sets of `type_id` values from public market orders; the app needs server-side catalog metadata to turn those IDs into useful recommendations.
+
+## Confirmed Direction
+
+- First version uses Supabase Postgres as the catalog database.
+- SDE parsing, importing, and querying live in Rust service code.
+- React desktop code never parses SDE files and never connects directly to the database.
+- Tauri commands call Rust catalog service functions and receive prepared view models.
+- Database URLs and credentials are never committed. They must be read from environment variables.
+
+The database credentials previously pasted into chat should be treated as exposed and rotated in Supabase before implementation uses them.
 
 ## Source Data
 
-Use CCP's official Static Data Export (SDE) from EVE Developers.
-
-Primary source:
+Use CCP's official SDE JSON Lines archive:
 
 - `https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip`
 
@@ -21,38 +29,48 @@ Supporting metadata:
 - `https://developers.eveonline.com/static-data/tranquility/latest.jsonl`
 - `https://developers.eveonline.com/static-data/tranquility/schema-changelog.yaml`
 
-The current checked source during design was build `3351823`, released `2026-05-19T12:12:31Z`. The implementation must not hard-code this build number; it should record whichever build was imported.
+The current checked source during design was build `3351823`, released `2026-05-19T12:12:31Z`. The implementation must not hard-code this build number.
 
-Use JSON Lines rather than YAML. The official static data documentation recommends JSON Lines for large files because it is more memory efficient and better suited to streaming.
+Use JSON Lines rather than YAML because it is better suited to streaming and large file parsing.
+
+## Supabase Connection Policy
+
+Use an environment variable:
+
+- `EVETOOLS_DATABASE_URL`
+
+The value should be a Supabase Postgres URL with SSL enabled, for example with `sslmode=require`. Do not store actual credentials in source files, plans, README examples, tests, or screenshots.
+
+For the first importer, prefer the direct Postgres connection for migrations and large imports. Supabase's pooler is useful for many short-lived client sessions, but the importer performs long transactions and bulk writes. The pooler can be evaluated later for read-only query workloads.
+
+The desktop app must not ship a privileged database URL to end users. This Supabase-first implementation is acceptable for a private/local tool and development. Before distributing the app, replace direct DB access with a hosted API, Supabase Edge Function, or strict RLS-backed public read path.
 
 ## Scope
 
-This design covers a static catalog MVP, not a full SDE mirror.
-
 In scope:
 
-- Download or read an SDE JSONL zip.
-- Import item catalog data into SQLite.
-- Store SDE build metadata.
-- Store localized item, group, category, and market group names when present.
-- Support fast local item lookup by type ID and name.
-- Support filtering market-recommendation candidates by market eligibility and basic category metadata.
+- Download or read an SDE JSONL zip in Rust.
+- Parse `_sde.jsonl`, `types.jsonl`, `groups.jsonl`, `categories.jsonl`, and `marketGroups.jsonl`.
+- Normalize `_key` into internal IDs.
+- Import catalog rows into Supabase Postgres.
+- Store import metadata and row counts.
+- Preserve English and Chinese names/descriptions plus raw localized JSON.
+- Expose Rust service methods for status, import latest, import local archive, search, lookup, and market eligibility.
+- Expose Tauri commands that call the Rust catalog service.
 
 Out of scope:
 
 - Dogma attributes and effects.
 - Industry blueprints and materials.
-- Universe geography beyond the fields needed by the trade hub config.
 - Icons and image assets.
-- Full station, structure, sovereignty, or faction metadata.
-- Full in-app SDE update UI.
+- Full universe geography.
+- Full in-app import/update UI.
 - Delta imports from SDE change files.
+- Public production credential distribution.
 
-The schema should leave room for later full SDE support, but the first implementation should only import fields needed by market search and discovery.
+## Data Files And Fields
 
-## Data Files
-
-The importer should read these SDE files from the JSONL zip:
+The importer reads:
 
 - `_sde.jsonl`
 - `types.jsonl`
@@ -60,11 +78,9 @@ The importer should read these SDE files from the JSONL zip:
 - `categories.jsonl`
 - `marketGroups.jsonl`
 
-Expected catalog fields:
+The JSONL files use `_key` as the row's canonical ID. The importer normalizes `_key` into `type_id`, `group_id`, `category_id`, and `market_group_id`.
 
-The JSONL files use `_key` as the row's canonical ID. The importer should normalize `_key` into the app schema's `type_id`, `group_id`, `category_id`, and `market_group_id` fields. If a future SDE row also carries an explicit ID field such as `typeID`, the importer should validate that it matches `_key` and prefer `_key`.
-
-### Types
+Type fields:
 
 - `_key` as `type_id`
 - `name`
@@ -79,191 +95,90 @@ The JSONL files use `_key` as the row's canonical ID. The importer should normal
 - `portionSize`
 - `metaLevel` when present
 
-### Groups
+Group fields:
 
 - `_key` as `group_id`
 - `categoryID`
 - `name`
 - `published`
 
-### Categories
+Category fields:
 
 - `_key` as `category_id`
 - `name`
 - `published`
 
-### Market Groups
+Market group fields:
 
 - `_key` as `market_group_id`
 - `parentGroupID`
 - `name`
 - `description`
 
-### SDE Metadata
+SDE metadata fields:
 
 - `buildNumber`
 - `releaseDate`
 
-The importer should tolerate missing optional fields and schema additions. Missing required IDs should cause the row to be skipped with an import warning, not a panic.
+Missing optional fields are allowed. Missing required IDs cause that row to be counted as rejected with an import warning.
 
 ## Localization
 
-SDE names and descriptions are localized maps. The catalog should preserve at least:
+Preserve at least:
 
-- English
-- Simplified Chinese
-
-Recommended language keys:
-
-- `en`
-- `zh`
-
-If the SDE uses more specific keys such as `en-us` or `zh-cn`, normalize them into the app's supported language model at import time while preserving the raw value where useful.
+- English: `en`
+- Simplified Chinese: `zh`
 
 Display fallback order:
 
 1. Requested UI language.
 2. English.
 3. First available SDE name.
-4. `Type <type_id>` fallback.
+4. `Type <type_id>`.
 
-Search should support English and Chinese names. First implementation can use SQLite `LIKE` or FTS5 depending on what is simplest with the selected SQLite package. The design should not require a custom tokenizer in the first version.
-
-## Dependency Policy
-
-Do not hand-roll commodity infrastructure.
-
-Allowed and preferred third-party crates:
-
-- `zip` for reading the SDE zip archive.
-- `serde` and `serde_json` for JSONL parsing.
-- `reqwest` for HTTP download, reusing the existing workspace dependency.
-- `rusqlite` or `sqlx` for SQLite access and transactions.
-- `sha2` or a similar small crate if archive integrity checks are needed.
-- `tempfile` for importer tests.
-
-The implementation should prefer stable, widely used crates over custom zip parsing, custom JSON tokenization, or ad hoc SQL batching.
+Search supports English and Chinese names. The first version can use indexed `ILIKE` queries. PostgreSQL full-text or trigram search can be added later.
 
 ## Architecture
 
-Add a static catalog import path under the Rust backend, keeping parsing, storage, and domain lookup separate.
-
-Suggested module split:
+Use a Rust service boundary:
 
 ```text
-crates/
-  sde/                 SDE archive reader, JSONL parsers, import service
-  db/                  SQLite connection, migrations, catalog repositories
-  domain/              catalog domain models and market filtering decisions
-apps/
-  desktop/src-tauri/   Tauri commands that call catalog services
+React UI
+  |
+Tauri commands
+  |
+crates/catalog        application service, config, orchestration
+  |
+crates/sde            SDE download, zip reading, JSONL parsing
+  |
+crates/db             Supabase/Postgres schema and repository
+  |
+Supabase Postgres
 ```
 
-If creating a new `crates/sde` crate feels too heavy during implementation, the same boundary can start inside `crates/db` or `crates/worker`, but parser logic should still be isolated from Tauri commands.
+Responsibilities:
 
-Recommended public boundaries:
+- `crates/sde`: pure SDE source handling. It knows about zip files, JSONL rows, and official download URLs.
+- `crates/db`: Postgres schema migration and catalog repository queries.
+- `crates/catalog`: application service that coordinates SDE import/download and repository operations.
+- `apps/desktop/src-tauri`: command adapter only. It reads config, calls `CatalogService`, and returns typed views.
+- `apps/desktop/src`: typed command wrappers only. No database access.
 
-```text
-SdeArchiveSource
-SdeCatalogImporter
-CatalogRepository
-ItemCatalogService
-```
+## Database Model
 
-Tauri command handlers should not parse SDE files directly.
+Use a dedicated schema:
 
-## Import Modes
+- `evetools_catalog`
 
-Support two input modes:
+Tables:
 
-1. Local archive import.
-2. Official latest archive download.
+- `evetools_catalog.sde_imports`
+- `evetools_catalog.inventory_types`
+- `evetools_catalog.inventory_groups`
+- `evetools_catalog.inventory_categories`
+- `evetools_catalog.market_groups`
 
-Local archive import is important for tests and reproducible development. Official latest download is useful for normal users and developer setup.
-
-Suggested commands or service functions:
-
-- `import_sde_catalog_from_file(path)`
-- `import_sde_catalog_latest()`
-- `get_sde_catalog_status()`
-- `search_inventory_types(query, language, limit)`
-- `get_inventory_type(type_id, language)`
-
-The first UI does not need a full update screen. A developer command or startup bootstrap is acceptable if documented, but the service should be designed so a settings screen can call it later.
-
-## Storage Model
-
-Use SQLite for the catalog. The database should be local to the desktop app profile once app storage is implemented.
-
-Suggested tables:
-
-### `sde_imports`
-
-- `import_id`
-- `build_number`
-- `release_date`
-- `source_url`
-- `started_at`
-- `completed_at`
-- `status`
-- `error_summary`
-- `type_count`
-- `group_count`
-- `category_count`
-- `market_group_count`
-
-### `inventory_types`
-
-- `type_id`
-- `group_id`
-- `market_group_id`
-- `published`
-- `volume`
-- `packaged_volume`
-- `capacity`
-- `mass`
-- `portion_size`
-- `meta_level`
-- `name_en`
-- `name_zh`
-- `description_en`
-- `description_zh`
-- `raw_name_json`
-- `raw_description_json`
-- `updated_import_id`
-
-### `inventory_groups`
-
-- `group_id`
-- `category_id`
-- `published`
-- `name_en`
-- `name_zh`
-- `raw_name_json`
-- `updated_import_id`
-
-### `inventory_categories`
-
-- `category_id`
-- `published`
-- `name_en`
-- `name_zh`
-- `raw_name_json`
-- `updated_import_id`
-
-### `market_groups`
-
-- `market_group_id`
-- `parent_group_id`
-- `name_en`
-- `name_zh`
-- `description_en`
-- `description_zh`
-- `raw_name_json`
-- `raw_description_json`
-- `updated_import_id`
-
-Indexes:
+Important indexes:
 
 - `inventory_types(type_id)`
 - `inventory_types(group_id)`
@@ -274,150 +189,107 @@ Indexes:
 - `inventory_groups(category_id)`
 - `market_groups(parent_group_id)`
 
-If FTS5 is used:
+The import should run inside a transaction. A failed import must preserve the previous successful catalog.
 
-- `inventory_type_search(type_id, name_en, name_zh)`
+## Public Service API
 
-The importer should write through a transaction. A failed import should not leave a half-imported active catalog.
+Rust service methods:
+
+- `CatalogService::status()`
+- `CatalogService::import_archive(path)`
+- `CatalogService::import_latest()`
+- `CatalogService::search_inventory_types(query, language, limit)`
+- `CatalogService::get_inventory_type(type_id, language)`
+- `CatalogService::market_eligible_types(limit)`
+
+Tauri command names:
+
+- `get_sde_catalog_status`
+- `import_sde_catalog_from_file`
+- `import_sde_catalog_latest`
+- `search_inventory_types`
+- `get_inventory_type`
+
+View models:
+
+- `CatalogStatus`
+- `InventoryTypeView`
+
+React receives these view models through Tauri only.
 
 ## Market Eligibility
 
-Discovery should only recommend items that can reasonably appear in market workflows.
-
-Initial market eligibility rule:
+Initial rule:
 
 - `published = true`
 - `market_group_id IS NOT NULL`
-- type has a non-empty display name
-- optional exclusion list for categories or groups that are not useful for station trading
+- at least one display name exists
 
-Do not overfit category exclusions in the static import phase. The recommendation engine can add scoring penalties later. The catalog should expose enough metadata for that engine to make decisions.
-
-## Import Flow
-
-Latest download flow:
-
-1. Fetch `latest.jsonl`.
-2. Parse build number and release date.
-3. If that build is already successfully imported, return current status.
-4. Download the latest JSONL zip.
-5. Stream the needed files from the zip.
-6. Parse rows with `serde_json`.
-7. Normalize localized names.
-8. Insert or replace rows inside a transaction.
-9. Record counts and status in `sde_imports`.
-10. Make the imported build active only after the transaction succeeds.
-
-Local archive flow:
-
-1. Open the user-provided or test archive path.
-2. Read build metadata from `_sde.jsonl` if present; otherwise require explicit metadata from the caller or mark source as local unknown build.
-3. Run the same parse, normalize, and write path.
+The catalog service exposes eligibility as data. The recommendation engine can add scoring penalties or exclusions later.
 
 ## Error Handling
 
-Expected error classes:
+Expected errors:
 
-- Network failure while checking latest build.
-- Network failure while downloading archive.
-- Invalid or unsupported zip archive.
-- Missing required SDE files.
-- JSON parse failure for individual rows.
-- SQLite migration or write failure.
-- Disk-space failure.
-- Import canceled or interrupted.
+- Missing `EVETOOLS_DATABASE_URL`.
+- Supabase connection failure.
+- Migration failure.
+- SDE latest metadata download failure.
+- SDE archive download failure.
+- Invalid zip archive.
+- Missing required SDE file.
+- JSONL row parse failure.
+- Transaction rollback after import failure.
 
 Behavior:
 
-- Row-level parse failures should be counted and reported if the row is not critical.
-- Missing entire required files should fail the import.
-- A failed import should preserve the previous active catalog.
-- The UI or command result should expose the last successful build and the latest failed import summary.
+- Missing config returns a clear service error.
+- Failed import does not replace the last successful import.
+- Row-level parse failures are counted and surfaced.
+- Missing required files fail the import.
+- Tauri commands convert service errors into user-visible strings without leaking credentials.
 
-## Performance Direction
-
-The importer should be streaming and transaction-based:
-
-- Do not extract the full archive to permanent app storage unless needed.
-- Do not load large JSONL files entirely into memory.
-- Batch writes inside a single transaction or controlled chunk transactions.
-- Build or refresh search indexes after rows are written.
-
-The first implementation should prefer correctness and bounded memory over maximum import speed.
-
-## Relationship To NPC Hub Discovery
-
-NPC Hub Selection Discovery depends on this catalog for:
-
-- mapping order `type_id` to localized item names
-- filtering marketable published items
-- grouping recommendations by category or market group
-- showing useful display metadata
-- avoiding one ESI type lookup per discovered item
-
-Discovery should treat missing catalog rows as degraded data. It may show `Type <id>` for a row, but high-confidence recommendations should require catalog metadata once the catalog importer exists.
-
-## Testing Strategy
+## Testing
 
 Parser tests:
 
-- parse representative `types.jsonl`, `groups.jsonl`, `categories.jsonl`, and `marketGroups.jsonl` rows
-- handle missing optional fields
-- normalize English and Chinese localized names
-- tolerate extra fields from future SDE builds
+- parse representative SDE rows
+- normalize `_key`
+- preserve English and Chinese names
+- tolerate missing optional fields
 
-Importer tests:
+Archive tests:
 
-- import a small test zip into a temporary SQLite database
-- verify counts and active build metadata
-- verify failed imports preserve the previous active catalog
-- verify required file missing causes a controlled error
+- read a small generated JSONL zip
+- fail cleanly when required files are missing
 
 Repository tests:
 
-- lookup by type ID
-- search by English name
-- search by Chinese name
+- run migrations against Postgres when `EVETOOLS_TEST_DATABASE_URL` is set
+- import a small catalog archive transactionally
+- query by type ID
+- search English and Chinese names
 - filter market-eligible types
-- retrieve group, category, and market group metadata
+- preserve previous rows after failed import
+
+Service tests:
+
+- missing database URL returns config error
+- service delegates status/search/lookup to repository
+- import local archive coordinates parser and repository
 
 Desktop command tests:
 
-- catalog status reports not imported before import
-- local test archive import updates status
-- search returns localized display names
-
-Integration tests:
-
-- static catalog can enrich a mocked market order type ID without ESI type lookup
+- missing database config returns a controlled error
+- command wrappers compile and return typed shapes in unit tests where possible
 
 ## Documentation
 
 README should document:
 
-- why static SDE data is required
-- how to import or refresh the catalog in development
-- which official SDE source is used
-- that the first importer is catalog-only, not full SDE coverage
-
-## Migration Path
-
-Phase 1:
-
-- catalog import schema
-- local test archive import
-- search and type lookup services
-
-Phase 2:
-
-- official latest download
-- startup or settings-triggered import
-- frontend search integration
-
-Phase 3:
-
-- NPC Hub Discovery consumes catalog metadata
-
-Phase 4:
-
-- optional expanded SDE domains such as dogma, blueprints, icons, and universe geography
+- official SDE source URL
+- required `EVETOOLS_DATABASE_URL`
+- recommendation to rotate exposed credentials
+- Supabase direct connection recommendation for imports
+- no secrets in source control
+- React uses Tauri commands rather than direct DB access
