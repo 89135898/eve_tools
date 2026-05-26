@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 
+const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
+const MAX_SEARCH_LIMIT: i64 = 100;
+
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
     #[error("database error: {0}")]
@@ -56,21 +59,7 @@ impl CatalogRepository {
     }
 
     pub async fn latest_status(&self) -> Result<CatalogStatus, CatalogDbError> {
-        let row = sqlx::query_as::<
-            _,
-            (
-                String,
-                Option<i32>,
-                Option<String>,
-                Option<String>,
-                Option<chrono::DateTime<Utc>>,
-                Option<String>,
-                i64,
-                i64,
-                i64,
-                i64,
-            ),
-        >(
+        let row = sqlx::query_as::<_, CatalogStatusRecord>(
             "SELECT status, build_number, release_date, source_url, completed_at, error_summary,
                     type_count, group_count, category_count, market_group_count
              FROM evetools_catalog.sde_imports
@@ -81,30 +70,8 @@ impl CatalogRepository {
         .await?;
 
         Ok(row
-            .map(|row| CatalogStatus {
-                status: row.0,
-                build_number: row.1,
-                release_date: row.2,
-                source_url: row.3,
-                completed_at: row.4.map(|value| value.to_rfc3339()),
-                error_summary: row.5,
-                type_count: row.6,
-                group_count: row.7,
-                category_count: row.8,
-                market_group_count: row.9,
-            })
-            .unwrap_or(CatalogStatus {
-                status: "not-imported".to_string(),
-                build_number: None,
-                release_date: None,
-                source_url: None,
-                completed_at: None,
-                error_summary: None,
-                type_count: 0,
-                group_count: 0,
-                category_count: 0,
-                market_group_count: 0,
-            }))
+            .map(catalog_status_from_record)
+            .unwrap_or_else(not_imported_status))
     }
 
     pub async fn import_archive(
@@ -112,6 +79,12 @@ impl CatalogRepository {
         input: ImportCatalogInput<'_>,
     ) -> Result<CatalogStatus, CatalogDbError> {
         let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(CATALOG_IMPORT_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+
         let import_id: i64 = sqlx::query_scalar(
             "INSERT INTO evetools_catalog.sde_imports
                 (build_number, release_date, source_url, started_at, status)
@@ -128,6 +101,7 @@ impl CatalogRepository {
         insert_groups(&mut tx, import_id, input.archive).await?;
         insert_market_groups(&mut tx, import_id, input.archive).await?;
         insert_types(&mut tx, import_id, input.archive).await?;
+        delete_stale_catalog_rows(&mut tx, import_id).await?;
 
         sqlx::query(
             "UPDATE evetools_catalog.sde_imports
@@ -145,7 +119,7 @@ impl CatalogRepository {
         .await?;
 
         tx.commit().await?;
-        self.latest_status().await
+        self.status_by_import_id(import_id).await
     }
 
     pub async fn get_inventory_type(
@@ -166,7 +140,12 @@ impl CatalogRepository {
         language: &str,
         limit: i64,
     ) -> Result<Vec<InventoryTypeView>, CatalogDbError> {
-        let pattern = format!("%{}%", query.trim());
+        let Some(limit) = search_limit(limit) else {
+            return Ok(Vec::new());
+        };
+        let Some(pattern) = search_pattern(query) else {
+            return Ok(Vec::new());
+        };
         let rows = sqlx::query_as::<_, InventoryTypeRow>(
             "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
                     t.name_en, t.name_zh, g.name_en AS group_name_en, g.name_zh AS group_name_zh,
@@ -178,7 +157,7 @@ impl CatalogRepository {
              LEFT JOIN evetools_catalog.inventory_groups g ON g.group_id = t.group_id
              LEFT JOIN evetools_catalog.inventory_categories c ON c.category_id = g.category_id
              LEFT JOIN evetools_catalog.market_groups mg ON mg.market_group_id = t.market_group_id
-             WHERE t.name_en ILIKE $1 OR t.name_zh ILIKE $1
+             WHERE t.name_en ILIKE $1 ESCAPE '\\' OR t.name_zh ILIKE $1 ESCAPE '\\'
              ORDER BY t.name_en NULLS LAST
              LIMIT $2",
         )
@@ -190,6 +169,63 @@ impl CatalogRepository {
             .into_iter()
             .map(|row| row.into_view(language))
             .collect())
+    }
+
+    async fn status_by_import_id(&self, import_id: i64) -> Result<CatalogStatus, CatalogDbError> {
+        let row = sqlx::query_as::<_, CatalogStatusRecord>(
+            "SELECT status, build_number, release_date, source_url, completed_at, error_summary,
+                    type_count, group_count, category_count, market_group_count
+             FROM evetools_catalog.sde_imports
+             WHERE import_id = $1",
+        )
+        .bind(import_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(catalog_status_from_record(row))
+    }
+}
+
+type CatalogStatusRecord = (
+    String,
+    Option<i32>,
+    Option<String>,
+    Option<String>,
+    Option<chrono::DateTime<Utc>>,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    i64,
+);
+
+fn catalog_status_from_record(row: CatalogStatusRecord) -> CatalogStatus {
+    CatalogStatus {
+        status: row.0,
+        build_number: row.1,
+        release_date: row.2,
+        source_url: row.3,
+        completed_at: row.4.map(|value| value.to_rfc3339()),
+        error_summary: row.5,
+        type_count: row.6,
+        group_count: row.7,
+        category_count: row.8,
+        market_group_count: row.9,
+    }
+}
+
+fn not_imported_status() -> CatalogStatus {
+    CatalogStatus {
+        status: "not-imported".to_string(),
+        build_number: None,
+        release_date: None,
+        source_url: None,
+        completed_at: None,
+        error_summary: None,
+        type_count: 0,
+        group_count: 0,
+        category_count: 0,
+        market_group_count: 0,
     }
 }
 
@@ -283,6 +319,32 @@ fn choose_name(prefer_zh: bool, zh: Option<&String>, en: Option<&String>) -> Opt
     } else {
         en.or(zh).cloned()
     }
+}
+
+fn search_limit(limit: i64) -> Option<i64> {
+    if limit <= 0 {
+        None
+    } else {
+        Some(limit.min(MAX_SEARCH_LIMIT))
+    }
+}
+
+fn search_pattern(query: &str) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    Some(pattern)
 }
 
 async fn insert_categories(
@@ -432,4 +494,46 @@ async fn insert_types(
         .await?;
     }
     Ok(())
+}
+
+async fn delete_stale_catalog_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+) -> Result<(), sqlx::Error> {
+    for statement in DELETE_STALE_CATALOG_ROWS_STATEMENTS {
+        sqlx::query(statement)
+            .bind(import_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+const DELETE_STALE_CATALOG_ROWS_STATEMENTS: &[&str] = &[
+    "DELETE FROM evetools_catalog.inventory_types WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.market_groups WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.inventory_groups WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.inventory_categories WHERE updated_import_id <> $1",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_limit_rejects_non_positive_values_and_clamps_large_values() {
+        assert_eq!(search_limit(0), None);
+        assert_eq!(search_limit(-10), None);
+        assert_eq!(search_limit(1), Some(1));
+        assert_eq!(search_limit(101), Some(100));
+    }
+
+    #[test]
+    fn search_pattern_trims_and_escapes_ilike_wildcards() {
+        assert_eq!(search_pattern("   "), None);
+        assert_eq!(
+            search_pattern(r"  %_\Mineral  "),
+            Some(r"%\%\_\\Mineral%".to_string())
+        );
+    }
 }
