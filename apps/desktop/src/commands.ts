@@ -62,3 +62,54 @@ export function listOrderMonitorItems(): Promise<OrderMonitorView[]> {
 export function getSyncStatus(): Promise<SyncStatus> {
   return invoke<SyncStatus>("get_sync_status");
 }
+
+export type CatalogStatus = {
+  status: string;
+  build_number: number | null;
+  release_date: string | null;
+  source_url: string | null;
+  completed_at: string | null;
+  error_summary: string | null;
+  type_count: number;
+  group_count: number;
+  category_count: number;
+  market_group_count: number;
+};
+
+export type InventoryTypeView = {
+  type_id: number;
+  group_id: number;
+  category_id: number | null;
+  market_group_id: number | null;
+  display_name: string;
+  name_en: string | null;
+  name_zh: string | null;
+  group_name: string | null;
+  category_name: string | null;
+  market_group_name: string | null;
+  published: boolean;
+  market_eligible: boolean;
+};
+
+export function getSdeCatalogStatus(): Promise<CatalogStatus> {
+  return invoke<CatalogStatus>("get_sde_catalog_status");
+}
+
+export function importSdeCatalogLatest(): Promise<CatalogStatus> {
+  return invoke<CatalogStatus>("import_sde_catalog_latest");
+}
+
+export function searchInventoryTypes(
+  query: string,
+  language: string,
+  limit = 20
+): Promise<InventoryTypeView[]> {
+  return invoke<InventoryTypeView[]>("search_inventory_types", { query, language, limit });
+}
+
+export function getInventoryType(
+  typeId: number,
+  language: string
+): Promise<InventoryTypeView | null> {
+  return invoke<InventoryTypeView | null>("get_inventory_type", { typeId, language });
+}

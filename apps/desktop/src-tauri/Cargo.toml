@@ -14,6 +14,8 @@ tauri-build.workspace = true
 
 [dependencies]
 chrono.workspace = true
+evetools-catalog = { path = "../../../crates/catalog" }
+evetools-db = { path = "../../../crates/db" }
 evetools-domain = { path = "../../../crates/domain" }
 evetools-esi = { path = "../../../crates/esi" }
 evetools-worker = { path = "../../../crates/worker" }

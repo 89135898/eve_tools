@@ -1055,6 +1055,8 @@ name = "evetools-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "evetools-catalog",
+ "evetools-db",
  "evetools-domain",
  "evetools-esi",
  "evetools-worker",

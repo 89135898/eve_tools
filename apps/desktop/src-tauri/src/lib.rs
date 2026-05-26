@@ -1,4 +1,6 @@
 use chrono::Utc;
+use evetools_catalog::{CatalogConfig, CatalogService};
+use evetools_db::{CatalogStatus, InventoryTypeView};
 use evetools_domain::fixtures::{
     fixture_market_lookup, fixture_order_monitor, fixture_selection_candidates,
 };
@@ -14,6 +16,8 @@ use evetools_worker::{
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 const SELECTION_SEED_TYPES: &[(i32, &str)] = &[
     (34, "Tritanium"),
@@ -223,13 +227,91 @@ fn get_sync_status_with_source(source: MarketSource) -> Result<SyncStatus, Strin
     }
 }
 
+#[derive(Default)]
+struct CatalogServiceState {
+    service: OnceCell<Result<Arc<CatalogService>, String>>,
+}
+
+impl CatalogServiceState {
+    async fn get(&self) -> Result<Arc<CatalogService>, String> {
+        self.service
+            .get_or_init(|| async {
+                let config = CatalogConfig::from_env().map_err(|error| error.to_string())?;
+                CatalogService::connect(config)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .clone()
+    }
+}
+
+#[tauri::command]
+async fn get_sde_catalog_status(
+    state: tauri::State<'_, CatalogServiceState>,
+) -> Result<CatalogStatus, String> {
+    state
+        .get()
+        .await?
+        .status()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_sde_catalog_latest(
+    state: tauri::State<'_, CatalogServiceState>,
+) -> Result<CatalogStatus, String> {
+    state
+        .get()
+        .await?
+        .import_latest()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn search_inventory_types(
+    state: tauri::State<'_, CatalogServiceState>,
+    query: String,
+    language: String,
+    limit: i64,
+) -> Result<Vec<InventoryTypeView>, String> {
+    state
+        .get()
+        .await?
+        .search_inventory_types(&query, &language, limit)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_inventory_type(
+    state: tauri::State<'_, CatalogServiceState>,
+    type_id: i32,
+    language: String,
+) -> Result<Option<InventoryTypeView>, String> {
+    state
+        .get()
+        .await?
+        .get_inventory_type(type_id, &language)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .manage(CatalogServiceState::default())
         .invoke_handler(tauri::generate_handler![
             lookup_market_price,
             list_selection_candidates,
             list_order_monitor_items,
-            get_sync_status
+            get_sync_status,
+            get_sde_catalog_status,
+            import_sde_catalog_latest,
+            search_inventory_types,
+            get_inventory_type
         ])
         .run(tauri::generate_context!())
         .expect("failed to run EveTools desktop application");
@@ -306,5 +388,18 @@ mod tests {
             "fixture-fallback"
         );
         mark_public_market_fallback(false);
+    }
+
+    #[tokio::test]
+    async fn catalog_service_state_reports_missing_database_url() {
+        std::env::remove_var("EVETOOLS_DATABASE_URL");
+
+        let state = CatalogServiceState::default();
+        let error = match state.get().await {
+            Ok(_) => panic!("expected missing database url error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "EVETOOLS_DATABASE_URL is required");
     }
 }
