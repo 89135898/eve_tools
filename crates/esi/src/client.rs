@@ -2,6 +2,7 @@ use crate::{
     EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType, EsiTypeInfo,
     ResolvedInventoryType, UniverseIdsResponse,
 };
+use serde::de::DeserializeOwned;
 
 #[derive(Clone, Debug)]
 pub struct EsiClient {
@@ -56,28 +57,93 @@ impl EsiClient {
         })
     }
 
-    pub async fn universe_ids(&self, _name: &str) -> Result<UniverseIdsResponse, EsiError> {
-        Err(EsiError::ItemNotFound)
+    pub async fn universe_ids(&self, name: &str) -> Result<UniverseIdsResponse, EsiError> {
+        let url = format!(
+            "{}/latest/universe/ids/?datasource=tranquility",
+            self.base_url
+        );
+        let request = self.http.post(url).json(&[name]);
+        self.decode_response(request.send().await).await
     }
 
-    pub async fn type_info(&self, _type_id: i32) -> Result<EsiTypeInfo, EsiError> {
-        Err(EsiError::ItemNotFound)
+    pub async fn type_info(&self, type_id: i32) -> Result<EsiTypeInfo, EsiError> {
+        let url = format!(
+            "{}/latest/universe/types/{type_id}/?datasource=tranquility",
+            self.base_url
+        );
+        let request = self.http.get(url);
+        self.decode_response(request.send().await).await
     }
 
     pub async fn market_orders(
         &self,
-        _region_id: i32,
-        _type_id: i32,
-        _order_type: EsiOrderType,
+        region_id: i32,
+        type_id: i32,
+        order_type: EsiOrderType,
     ) -> Result<Vec<EsiMarketOrder>, EsiError> {
-        Ok(Vec::new())
+        let mut current_page = 1;
+        let mut orders = Vec::new();
+
+        loop {
+            let url = format!(
+                "{}/latest/markets/{region_id}/orders/?datasource=tranquility&order_type={}&type_id={type_id}&page={current_page}",
+                self.base_url,
+                order_type.as_query_value()
+            );
+            let request = self.http.get(url);
+            let response = request.send().await.map_err(EsiError::Http)?;
+            let total_pages = response
+                .headers()
+                .get("X-Pages")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(1);
+            let mut page_orders: Vec<EsiMarketOrder> = self.decode_response(Ok(response)).await?;
+            orders.append(&mut page_orders);
+            if current_page >= total_pages {
+                break;
+            }
+            current_page += 1;
+        }
+
+        Ok(orders)
     }
 
     pub async fn market_history(
         &self,
-        _region_id: i32,
-        _type_id: i32,
+        region_id: i32,
+        type_id: i32,
     ) -> Result<Vec<EsiMarketHistoryDay>, EsiError> {
-        Ok(Vec::new())
+        let url = format!(
+            "{}/latest/markets/{region_id}/history/?datasource=tranquility&type_id={type_id}",
+            self.base_url
+        );
+        let request = self.http.get(url);
+        self.decode_response(request.send().await).await
+    }
+
+    async fn decode_response<T>(
+        &self,
+        response_result: Result<reqwest::Response, reqwest::Error>,
+    ) -> Result<T, EsiError>
+    where
+        T: DeserializeOwned,
+    {
+        let response = response_result.map_err(EsiError::Http)?;
+        let status = response.status();
+        let body = response.text().await.map_err(EsiError::Http)?;
+
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(EsiError::ItemNotFound);
+        }
+
+        if !status.is_success() {
+            return Err(EsiError::Status {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        serde_json::from_str::<T>(&body).map_err(EsiError::Decode)
     }
 }
