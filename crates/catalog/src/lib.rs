@@ -10,8 +10,19 @@ const OFFICIAL_SDE_ARCHIVE_URL: &str =
     "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
 
 #[derive(Clone)]
+/// Catalog database connection configuration.
+///
+/// Construct with [`CatalogConfig::from_database_url`] or [`CatalogConfig::from_env`].
+///
+/// ```compile_fail
+/// use evetools_catalog::CatalogConfig;
+///
+/// let _config = CatalogConfig {
+///     database_url: "postgres://catalog_user:fake_password@db.example.invalid/eve_tools".to_string(),
+/// };
+/// ```
 pub struct CatalogConfig {
-    pub database_url: String,
+    database_url: String,
 }
 
 impl fmt::Debug for CatalogConfig {
