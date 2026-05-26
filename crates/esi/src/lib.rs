@@ -1,13 +1,30 @@
+pub mod client;
+pub mod models;
+
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+pub use client::EsiClient;
+pub use models::{
+    EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType, EsiTypeInfo, ResolvedInventoryType,
+    UniverseIdEntry, UniverseIdsResponse,
+};
+
+#[derive(Debug, Error)]
 pub enum EsiError {
-    #[error("ESI client is not connected in fixture mode")]
-    FixtureMode,
+    #[error("ESI HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("ESI response could not be decoded: {0}")]
+    Decode(#[from] serde_json::Error),
+    #[error("Item not found")]
+    ItemNotFound,
+    #[error("ESI returned status {status}: {body}")]
+    Status { status: u16, body: String },
+    #[error("Invalid inventory type id: {0}")]
+    InvalidTypeId(String),
 }
 
 pub fn client_mode() -> &'static str {
-    "fixture"
+    "live"
 }
 
 #[cfg(test)]
@@ -15,11 +32,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn esi_crate_starts_in_fixture_mode() {
-        assert_eq!(client_mode(), "fixture");
-        assert_eq!(
-            EsiError::FixtureMode.to_string(),
-            "ESI client is not connected in fixture mode"
-        );
+    fn esi_crate_reports_live_client_mode() {
+        assert_eq!(client_mode(), "live");
+        assert_eq!(EsiError::ItemNotFound.to_string(), "Item not found");
     }
 }

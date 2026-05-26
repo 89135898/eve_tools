@@ -1,0 +1,18 @@
+[
+  {
+    "average": 5.10,
+    "date": "2026-05-24",
+    "highest": 5.30,
+    "lowest": 4.90,
+    "order_count": 250,
+    "volume": 1000000
+  },
+  {
+    "average": 5.18,
+    "date": "2026-05-25",
+    "highest": 5.60,
+    "lowest": 5.00,
+    "order_count": 280,
+    "volume": 1250000
+  }
+]

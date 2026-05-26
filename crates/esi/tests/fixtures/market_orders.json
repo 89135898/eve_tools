@@ -1,0 +1,30 @@
+[
+  {
+    "duration": 90,
+    "is_buy_order": true,
+    "issued": "2026-05-25T11:45:00Z",
+    "location_id": 60003760,
+    "min_volume": 1,
+    "order_id": 7000000001,
+    "price": 5.01,
+    "range": "station",
+    "system_id": 30000142,
+    "type_id": 34,
+    "volume_remain": 500000,
+    "volume_total": 1000000
+  },
+  {
+    "duration": 90,
+    "is_buy_order": false,
+    "issued": "2026-05-25T11:46:00Z",
+    "location_id": 60003760,
+    "min_volume": 1,
+    "order_id": 7000000002,
+    "price": 5.49,
+    "range": "station",
+    "system_id": 30000142,
+    "type_id": 34,
+    "volume_remain": 620000,
+    "volume_total": 800000
+  }
+]
