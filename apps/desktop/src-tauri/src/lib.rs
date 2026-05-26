@@ -60,6 +60,9 @@ mod tests {
         );
         assert_eq!(list_selection_candidates().unwrap().len(), 2);
         assert_eq!(list_order_monitor_items().unwrap().len(), 2);
-        assert_eq!(get_sync_status().unwrap().public_market_sync, "fixture-ready");
+        assert_eq!(
+            get_sync_status().unwrap().public_market_sync,
+            "fixture-ready"
+        );
     }
 }
