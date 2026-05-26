@@ -8,11 +8,11 @@ The current implementation slice provides:
 - React/Vite desktop UI
 - Rust workspace crates for domain logic, ESI, storage, and workers
 - Tested Rust domain calculations for spread, fees, liquidity, and attention scoring
-- Fixture-backed market price lookup
-- Fixture-backed selection discovery
+- Public ESI-backed market price lookup with fixture fallback
+- Public ESI-backed selection discovery with fixture fallback
 - Fixture-backed order monitor
 
-This slice intentionally uses deterministic fixture data. Real public ESI sync, SQLite persistence, EVE SSO, and authenticated character-order sync are deferred to later implementation phases.
+This slice uses live public ESI for market lookup and selection discovery when available, while keeping deterministic fixture fallback for development and outages. SQLite persistence, EVE SSO, and authenticated character-order sync are deferred to later implementation phases.
 
 ## Development
 
@@ -52,6 +52,35 @@ Build the desktop app:
 pnpm build
 ```
 
+## Public ESI Market Sync
+
+The desktop app can use live public ESI data for the Jita market lookup and selection board.
+
+Market source mode is controlled by `EVETOOLS_MARKET_SOURCE`:
+
+```bash
+EVETOOLS_MARKET_SOURCE=live pnpm dev
+EVETOOLS_MARKET_SOURCE=fixture pnpm dev
+```
+
+When the variable is omitted, the backend uses `live`.
+
+Public ESI mode currently uses these unauthenticated endpoints:
+
+- `POST /universe/ids/`
+- `GET /universe/types/{type_id}/`
+- `GET /markets/{region_id}/orders/`
+- `GET /markets/{region_id}/history/`
+
+The current public slice is intentionally small:
+
+- The Forge region only.
+- Jita 4-4 station orders only for top-of-book analysis.
+- A fixed seed pool for selection discovery.
+- Fixture fallback on public ESI network, status, or decode failure.
+
+Authenticated character order monitoring remains fixture-backed until the SSO phase.
+
 ## Architecture
 
 Business logic lives in Rust crates:
@@ -70,29 +99,30 @@ React renders prepared views and calls Tauri commands. Tauri commands are adapte
 
 ## MVP Surfaces
 
-The first desktop screen exposes three fixture-backed surfaces:
+The first desktop screen exposes three surfaces:
 
 - `Market Price Lookup`: lookup current Jita price state for an item.
 - `Selection Discovery`: list candidate items with entry, exit, net profit, scores, and reasons.
 - `Order Monitor`: list active-order-style fixture rows with recommended action and urgency.
 
-Fixture sync status is split between public and private flows:
+Sync status is split between public and private flows:
 
-- Public market sync: `fixture-ready`
+- Public market sync: `live-ready`, `fixture-ready`, or `fixture-fallback`
 - Authenticated order sync: `not-authorized`
+- Data source: `live` or `fixture`
 
 ## Scope
 
 In scope for this foundation:
 
 - Local Tauri desktop shell.
-- Fixture-backed command boundary.
+- Public ESI-backed market lookup and selection discovery.
+- Fixture fallback command boundary.
 - React UI wired to Tauri commands.
 - Deterministic, testable Rust domain calculations.
 
 Out of scope for this foundation:
 
-- Real ESI HTTP calls.
 - SQLite schema and repositories.
 - EVE SSO token handling.
 - Authenticated character order synchronization.
