@@ -18,7 +18,7 @@ const OFFICIAL_SDE_ARCHIVE_URL: &str =
 /// use evetools_catalog::CatalogConfig;
 ///
 /// let _config = CatalogConfig {
-///     database_url: "postgres://catalog_user:fake_password@db.example.invalid/eve_tools".to_string(),
+///     database_url: "catalog-db-url-with-fake-password".to_string(),
 /// };
 /// ```
 pub struct CatalogConfig {

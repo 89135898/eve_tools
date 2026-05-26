@@ -11,7 +11,7 @@ fn config_requires_database_url() {
 
 #[test]
 fn config_debug_redacts_database_url() {
-    let database_url = "postgres://catalog_user:secret_password@db.example.invalid/eve_tools";
+    let database_url = "catalog-db-url-with-secret-password";
     let config = CatalogConfig::from_database_url(database_url).unwrap();
 
     let debug_output = format!("{config:?}");
