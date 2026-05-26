@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/domain"
+  "crates/domain",
+  "crates/esi",
+  "crates/db",
+  "crates/worker"
 ]
 
 [workspace.package]
