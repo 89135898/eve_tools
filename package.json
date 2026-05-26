@@ -1,0 +1,12 @@
+{
+  "name": "evetools",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "pnpm --filter @evetools/desktop dev",
+    "build": "pnpm --filter @evetools/desktop build",
+    "typecheck": "pnpm --filter @evetools/desktop typecheck",
+    "test:rust": "cargo test --workspace",
+    "check": "cargo test --workspace && pnpm --filter @evetools/desktop typecheck"
+  }
+}
