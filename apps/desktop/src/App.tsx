@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getSyncStatus,
@@ -34,6 +34,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
   const language = i18n.resolvedLanguage as SupportedLanguage;
   const numberFormatter = new Intl.NumberFormat(language);
 
@@ -46,6 +47,10 @@ export default function App() {
   }
 
   async function refresh() {
+    if (refreshInFlight.current) {
+      return;
+    }
+    refreshInFlight.current = true;
     setLoadState("loading");
     setError(null);
     try {
@@ -67,6 +72,8 @@ export default function App() {
       setSyncStatus(null);
       setError(err instanceof Error ? err.message : String(err));
       setLoadState("error");
+    } finally {
+      refreshInFlight.current = false;
     }
   }
 
@@ -120,7 +127,9 @@ export default function App() {
             }}
           >
             <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t("lookup.itemQuery")} />
-            <button type="submit">{t("actions.lookup")}</button>
+            <button type="submit" disabled={loadState === "loading"}>
+              {t("actions.lookup")}
+            </button>
           </form>
         </div>
         {lookup && (
