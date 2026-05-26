@@ -153,9 +153,8 @@ pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -
             Decimal::ZERO
         };
 
-    let net_margin_pct = if recommended_entry_price > Decimal::ZERO && recommended_exit_price > Decimal::ZERO {
-        ((recommended_exit_price - recommended_entry_price) / recommended_entry_price)
-            * Decimal::from(100)
+    let net_margin_pct = if recommended_entry_price > Decimal::ZERO {
+        (net_profit_value / recommended_entry_price) * Decimal::from(100)
     } else {
         Decimal::ZERO
     };
@@ -163,8 +162,9 @@ pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -
     let top_depth = summary.top_buy_depth.min(summary.top_sell_depth);
     let liquidity_score_value = liquidity_score(summary.daily_volume, top_depth);
     let attention_score_value = attention_score(net_margin_pct, summary.daily_volume, top_depth);
-    let reason_codes = candidate_reason_codes(summary, net_margin_pct, top_depth);
-    let confidence_score_value = confidence_score(summary, attention_score_value, liquidity_score_value);
+    let reason_codes =
+        candidate_reason_codes(summary, net_profit_value, summary.spread_percent(), top_depth);
+    let confidence_score_value = confidence_score(summary, liquidity_score_value, net_profit_value);
 
     CandidateAnalysis {
         type_id: summary.type_id,
@@ -179,38 +179,51 @@ pub fn build_selection_candidate(summary: &OrderBookSummary, fee: &FeeProfile) -
     }
 }
 
-fn confidence_score(summary: &OrderBookSummary, attention_score: u8, liquidity_score: u8) -> u8 {
+fn confidence_score(summary: &OrderBookSummary, liquidity_score: u8, net_profit_value: Decimal) -> u8 {
     let quality_score = match summary.data_quality() {
         DataQuality::Fresh => 100u16,
-        DataQuality::Stale => 70u16,
-        DataQuality::Sparse => 35u16,
-        DataQuality::Missing => 10u16,
+        DataQuality::Sparse => 45u16,
+        DataQuality::Missing => 0u16,
+        DataQuality::Stale => 35u16,
+    };
+    let profit_score = if net_profit_value > Decimal::ZERO {
+        100u16
+    } else {
+        20u16
     };
 
-    ((attention_score as u16 * 45 + liquidity_score as u16 * 35 + quality_score * 20) / 100) as u8
+    ((quality_score * 50 + liquidity_score as u16 * 30 + profit_score * 20) / 100) as u8
 }
 
 fn candidate_reason_codes(
     summary: &OrderBookSummary,
-    net_margin_pct: Decimal,
+    net_profit_value: Decimal,
+    spread_pct: Decimal,
     top_depth: u64,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
+    match summary.data_quality() {
+        DataQuality::Sparse => reasons.push("sparse_market_data".to_string()),
+        DataQuality::Missing => reasons.push("missing_market_side".to_string()),
+        DataQuality::Stale => reasons.push("stale_market_data".to_string()),
+        DataQuality::Fresh => {}
+    }
 
-    if summary.best_bid > Decimal::ZERO && summary.spread_percent() >= Decimal::new(3, 0) {
+    if spread_pct >= Decimal::new(5, 0) && net_profit_value > Decimal::ZERO {
         reasons.push("healthy_spread".to_string());
+    } else if spread_pct >= Decimal::new(2, 0) {
+        reasons.push("acceptable_spread".to_string());
     }
-    if summary.daily_volume >= 1_000 {
+    if summary.daily_volume >= 1_000_000 {
         reasons.push("high_daily_volume".to_string());
+    } else if summary.daily_volume >= 1_000 {
+        reasons.push("moderate_velocity".to_string());
     }
-    if top_depth >= 100 {
+    if top_depth >= 100_000 {
         reasons.push("deep_top_book".to_string());
     }
-    if summary.data_quality() == DataQuality::Sparse || summary.data_quality() == DataQuality::Missing {
-        reasons.push("sparse_market_data".to_string());
-    }
-    if net_margin_pct <= Decimal::ZERO {
-        reasons.push("negative_or_zero_margin".to_string());
+    if net_profit_value <= Decimal::ZERO {
+        reasons.push("negative_net_profit".to_string());
     }
 
     reasons
@@ -407,7 +420,7 @@ mod tests {
         assert_eq!(candidate.recommended_entry_price, Decimal::new(502, 2));
         assert_eq!(candidate.recommended_exit_price, Decimal::new(548, 2));
         assert!(candidate.net_profit > Decimal::ZERO);
-        assert!(candidate.attention_score >= 80);
+        assert_eq!(candidate.attention_score, 73);
         assert!(candidate
             .reason_codes
             .contains(&"healthy_spread".to_string()));
@@ -436,5 +449,119 @@ mod tests {
             .reason_codes
             .contains(&"sparse_market_data".to_string()));
         assert!(candidate.attention_score < 40);
+    }
+
+    #[test]
+    fn attention_score_uses_fee_adjusted_net_margin() {
+        let summary = OrderBookSummary {
+            type_id: 1001,
+            item_name: "Margin Item".to_string(),
+            best_bid: Decimal::new(1000, 2),
+            best_ask: Decimal::new(1200, 2),
+            daily_volume: 10_000,
+            top_buy_depth: 1_000,
+            top_sell_depth: 1_000,
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
+        };
+        let zero_fee = FeeProfile {
+            sales_tax_rate: Decimal::ZERO,
+            broker_fee_rate: Decimal::ZERO,
+            order_modification_fee: Decimal::ZERO,
+        };
+        let heavy_fee = FeeProfile {
+            sales_tax_rate: Decimal::new(40, 2),
+            broker_fee_rate: Decimal::new(40, 2),
+            order_modification_fee: Decimal::new(50, 2),
+        };
+
+        let candidate_low_fee = build_selection_candidate(&summary, &zero_fee);
+        let candidate_high_fee = build_selection_candidate(&summary, &heavy_fee);
+
+        assert!(candidate_low_fee.attention_score > candidate_high_fee.attention_score);
+    }
+
+    #[test]
+    fn confidence_score_follows_planned_formula() {
+        let summary = OrderBookSummary {
+            type_id: 1002,
+            item_name: "Sparse Item".to_string(),
+            best_bid: Decimal::new(1000, 2),
+            best_ask: Decimal::new(1100, 2),
+            daily_volume: 10,
+            top_buy_depth: 10,
+            top_sell_depth: 10,
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
+        };
+        let heavy_fee = FeeProfile {
+            sales_tax_rate: Decimal::new(50, 2),
+            broker_fee_rate: Decimal::new(50, 2),
+            order_modification_fee: Decimal::new(100, 2),
+        };
+
+        let candidate = build_selection_candidate(&summary, &heavy_fee);
+
+        // quality=100(fresh), liquidity=30, profit=20 => (100*50+30*30+20*20)/100 = 63
+        assert_eq!(candidate.confidence_score, 63);
+    }
+
+    #[test]
+    fn candidate_reasons_follow_planned_mapping() {
+        let missing_summary = OrderBookSummary {
+            type_id: 1003,
+            item_name: "Missing Side".to_string(),
+            best_bid: Decimal::new(1000, 2),
+            best_ask: Decimal::ZERO,
+            daily_volume: 5_000,
+            top_buy_depth: 10_000,
+            top_sell_depth: 0,
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
+        };
+        let moderate_summary = OrderBookSummary {
+            type_id: 1004,
+            item_name: "Moderate Velocity".to_string(),
+            best_bid: Decimal::new(1000, 2),
+            best_ask: Decimal::new(1030, 2),
+            daily_volume: 20_000,
+            top_buy_depth: 50_000,
+            top_sell_depth: 60_000,
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
+        };
+        let acceptable_spread_summary = OrderBookSummary {
+            type_id: 1005,
+            item_name: "Acceptable Spread".to_string(),
+            best_bid: Decimal::new(1000, 2),
+            best_ask: Decimal::new(1025, 2),
+            daily_volume: 2_000,
+            top_buy_depth: 2_000,
+            top_sell_depth: 2_000,
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
+        };
+        let heavy_fee = FeeProfile {
+            sales_tax_rate: Decimal::new(40, 2),
+            broker_fee_rate: Decimal::new(40, 2),
+            order_modification_fee: Decimal::new(100, 2),
+        };
+
+        let missing = build_selection_candidate(&missing_summary, &FeeProfile::conservative_default());
+        let moderate = build_selection_candidate(&moderate_summary, &FeeProfile::conservative_default());
+        let acceptable = build_selection_candidate(&acceptable_spread_summary, &heavy_fee);
+
+        assert!(missing
+            .reason_codes
+            .contains(&"missing_market_side".to_string()));
+        assert!(!missing
+            .reason_codes
+            .contains(&"sparse_market_data".to_string()));
+
+        assert!(moderate
+            .reason_codes
+            .contains(&"moderate_velocity".to_string()));
+
+        assert!(acceptable
+            .reason_codes
+            .contains(&"acceptable_spread".to_string()));
+        assert!(acceptable
+            .reason_codes
+            .contains(&"negative_net_profit".to_string()));
     }
 }
