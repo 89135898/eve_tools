@@ -14,6 +14,17 @@ import { supportedLanguages, translateCode, type SupportedLanguage } from "./i18
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
+function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus): SyncStatus {
+  if (lookupStatus.public_market_sync === "fixture-fallback" || candidateStatus.public_market_sync === "fixture-fallback") {
+    return {
+      ...candidateStatus,
+      public_market_sync: "fixture-fallback",
+      data_source: "fixture"
+    };
+  }
+  return candidateStatus ?? lookupStatus;
+}
+
 export default function App() {
   const { i18n, t } = useTranslation();
   const [query, setQuery] = useState("Tritanium");
@@ -38,18 +49,22 @@ export default function App() {
     setLoadState("loading");
     setError(null);
     try {
-      const [lookupResult, candidateResult, orderResult] = await Promise.all([
-        lookupMarketPrice(query),
-        listSelectionCandidates(),
-        listOrderMonitorItems()
-      ]);
-      const statusResult = await getSyncStatus();
+      const lookupResult = await lookupMarketPrice(query);
+      const lookupStatus = await getSyncStatus();
+      const candidateResult = await listSelectionCandidates();
+      const candidateStatus = await getSyncStatus();
+      const orderResult = await listOrderMonitorItems();
+      const statusResult = mergeSyncStatus(lookupStatus, candidateStatus);
       setLookup(lookupResult);
       setCandidates(candidateResult);
       setOrders(orderResult);
       setSyncStatus(statusResult);
       setLoadState("ready");
     } catch (err) {
+      setLookup(null);
+      setCandidates([]);
+      setOrders([]);
+      setSyncStatus(null);
       setError(err instanceof Error ? err.message : String(err));
       setLoadState("error");
     }
