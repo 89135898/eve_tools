@@ -1,0 +1,13 @@
+[package]
+name = "evetools-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+evetools-db = { path = "../db" }
+evetools-sde = { path = "../sde" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
