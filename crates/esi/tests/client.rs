@@ -1,5 +1,9 @@
 use evetools_esi::{EsiClient, EsiError, EsiOrderType};
 use httpmock::prelude::*;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
+use std::time::Duration;
 
 #[tokio::test]
 async fn resolves_inventory_type_by_name() {
@@ -119,4 +123,29 @@ async fn maps_not_found_status_to_item_not_found() {
     let error = client.resolve_inventory_type("999999").await.unwrap_err();
 
     assert!(matches!(error, EsiError::ItemNotFound));
+}
+
+#[tokio::test]
+async fn request_timeout_maps_to_http_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0; 1024];
+        let _ = stream.read(&mut buffer);
+        thread::sleep(Duration::from_millis(200));
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+        );
+    });
+
+    let client =
+        EsiClient::with_request_timeout(format!("http://{address}"), Duration::from_millis(25));
+    let error = client
+        .resolve_inventory_type("Tritanium")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, EsiError::Http(_)));
+    server.join().unwrap();
 }

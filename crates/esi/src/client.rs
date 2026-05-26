@@ -3,6 +3,10 @@ use crate::{
     ResolvedInventoryType, UniverseIdsResponse,
 };
 use serde::de::DeserializeOwned;
+use std::time::Duration;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct EsiClient {
@@ -16,9 +20,26 @@ impl EsiClient {
     }
 
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_timeouts(base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_request_timeout(base_url: impl Into<String>, request_timeout: Duration) -> Self {
+        Self::with_timeouts(base_url, DEFAULT_CONNECT_TIMEOUT, request_timeout)
+    }
+
+    pub fn with_timeouts(
+        base_url: impl Into<String>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .build()
+            .expect("failed to build reqwest client for ESI");
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
