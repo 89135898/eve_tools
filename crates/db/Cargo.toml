@@ -6,4 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
+evetools-sde = { path = "../sde" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
