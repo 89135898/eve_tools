@@ -13,6 +13,14 @@ import {
 import { supportedLanguages, translateCode, type SupportedLanguage } from "./i18n";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+type RefreshResult = {
+  lookup: MarketLookupView;
+  candidates: SelectionCandidateView[];
+  orders: OrderMonitorView[];
+  syncStatus: SyncStatus;
+};
+
+let refreshRequestInFlight: Promise<RefreshResult> | null = null;
 
 function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus): SyncStatus {
   if (lookupStatus.public_market_sync === "fixture-fallback" || candidateStatus.public_market_sync === "fixture-fallback") {
@@ -25,6 +33,31 @@ function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus):
   return candidateStatus ?? lookupStatus;
 }
 
+async function runRefreshRequest(query: string): Promise<RefreshResult> {
+  const lookupResult = await lookupMarketPrice(query);
+  const lookupStatus = await getSyncStatus();
+  const candidateResult = await listSelectionCandidates();
+  const candidateStatus = await getSyncStatus();
+  const orderResult = await listOrderMonitorItems();
+  const statusResult = mergeSyncStatus(lookupStatus, candidateStatus);
+  return {
+    lookup: lookupResult,
+    candidates: candidateResult,
+    orders: orderResult,
+    syncStatus: statusResult
+  };
+}
+
+function runSingleFlightRefresh(query: string): Promise<RefreshResult> {
+  if (refreshRequestInFlight) {
+    return refreshRequestInFlight;
+  }
+  refreshRequestInFlight = runRefreshRequest(query).finally(() => {
+    refreshRequestInFlight = null;
+  });
+  return refreshRequestInFlight;
+}
+
 export default function App() {
   const { i18n, t } = useTranslation();
   const [query, setQuery] = useState("Tritanium");
@@ -35,6 +68,7 @@ export default function App() {
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
+  const mountedRef = useRef(true);
   const language = i18n.resolvedLanguage as SupportedLanguage;
   const numberFormatter = new Intl.NumberFormat(language);
 
@@ -54,18 +88,19 @@ export default function App() {
     setLoadState("loading");
     setError(null);
     try {
-      const lookupResult = await lookupMarketPrice(query);
-      const lookupStatus = await getSyncStatus();
-      const candidateResult = await listSelectionCandidates();
-      const candidateStatus = await getSyncStatus();
-      const orderResult = await listOrderMonitorItems();
-      const statusResult = mergeSyncStatus(lookupStatus, candidateStatus);
-      setLookup(lookupResult);
-      setCandidates(candidateResult);
-      setOrders(orderResult);
-      setSyncStatus(statusResult);
+      const result = await runSingleFlightRefresh(query);
+      if (!mountedRef.current) {
+        return;
+      }
+      setLookup(result.lookup);
+      setCandidates(result.candidates);
+      setOrders(result.orders);
+      setSyncStatus(result.syncStatus);
       setLoadState("ready");
     } catch (err) {
+      if (!mountedRef.current) {
+        return;
+      }
       setLookup(null);
       setCandidates([]);
       setOrders([]);
@@ -78,7 +113,11 @@ export default function App() {
   }
 
   useEffect(() => {
+    mountedRef.current = true;
     void refresh();
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   return (
