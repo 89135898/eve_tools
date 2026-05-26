@@ -13,8 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
+chrono.workspace = true
 evetools-domain = { path = "../../../crates/domain" }
+evetools-esi = { path = "../../../crates/esi" }
 evetools-worker = { path = "../../../crates/worker" }
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
+tokio.workspace = true
