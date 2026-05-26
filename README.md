@@ -6,13 +6,13 @@ The current implementation slice provides:
 
 - Tauri 2 desktop shell
 - React/Vite desktop UI
-- Rust workspace crates for domain logic, ESI, storage, and workers
+- Rust workspace crates for domain logic, ESI, Supabase catalog data, and workers
 - Tested Rust domain calculations for spread, fees, liquidity, and attention scoring
 - Public ESI-backed market price lookup with fixture fallback
 - Public ESI-backed selection discovery with fixture fallback
 - Fixture-backed order monitor
 
-This slice uses live public ESI for market lookup and selection discovery when available, while keeping deterministic fixture fallback for development and outages. SQLite persistence, EVE SSO, and authenticated character-order sync are deferred to later implementation phases.
+This slice uses live public ESI for market lookup and selection discovery when available, while keeping deterministic fixture fallback for development and outages. Static SDE catalog data is imported into Supabase Postgres through the Rust catalog service. EVE SSO and authenticated character-order sync are deferred to later implementation phases.
 
 ## Development
 
@@ -81,13 +81,37 @@ The current public slice is intentionally small:
 
 Authenticated character order monitoring remains fixture-backed until the SSO phase.
 
+## Static SDE Catalog
+
+EveTools imports CCP's official SDE JSON Lines archive into Supabase Postgres through the Rust catalog service.
+
+Required environment variable:
+
+```bash
+export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
+```
+
+Do not commit real database URLs or passwords. If a credential is pasted into chat, logs, or source control, rotate it in Supabase before use.
+
+The first catalog slice imports:
+
+- `_sde.jsonl`
+- `types.jsonl`
+- `groups.jsonl`
+- `categories.jsonl`
+- `marketGroups.jsonl`
+
+React does not connect to Supabase directly. It calls Tauri commands, and Tauri calls the Rust catalog service.
+
 ## Architecture
 
 Business logic lives in Rust crates:
 
 - `crates/domain`: market models, price calculations, scoring, serialized view models, and fixtures.
 - `crates/esi`: ESI client boundary shell.
-- `crates/db`: storage boundary shell.
+- `crates/sde`: SDE JSON Lines archive discovery and record parsing.
+- `crates/db`: Supabase/Postgres catalog schema and repository.
+- `crates/catalog`: Rust catalog service for importing and querying static SDE data.
 - `crates/worker`: sync status and worker boundary shell.
 
 The desktop app lives in `apps/desktop`:
@@ -123,7 +147,7 @@ In scope for this foundation:
 
 Out of scope for this foundation:
 
-- SQLite schema and repositories.
+- Full trading persistence beyond the Supabase static SDE catalog.
 - EVE SSO token handling.
 - Authenticated character order synchronization.
 - Automated market order placement, modification, or cancellation.
