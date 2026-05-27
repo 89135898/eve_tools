@@ -2,7 +2,8 @@ pub mod catalog;
 pub mod schema;
 
 pub use catalog::{
-    CatalogDbError, CatalogRepository, CatalogStatus, ImportCatalogInput, InventoryTypeView,
+    CatalogDbError, CatalogImportProgress, CatalogImportTable, CatalogRepository, CatalogStatus,
+    ImportCatalogInput, InventoryTypeView,
 };
 pub use schema::{connect_pool, migrate_catalog_schema};
 

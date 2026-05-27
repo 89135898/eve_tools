@@ -53,7 +53,10 @@ The CLI responsibilities are limited to:
 - connect using `CatalogService::connect()`
 - call `CatalogService::import_latest()`
 - print status, build number, source URL, row counts, and completion time
+- print progress events emitted by `CatalogService::import_latest_with_progress()`
 - exit non-zero on failure without printing secrets
+
+The first progress implementation reports stages, archive byte size after download, parsed archive counts, and per-table Postgres write counts. It intentionally does not stream download percentages; that can be added later by changing `SdeClient` to stream response chunks and read `content-length`.
 
 ## Out Of Scope
 

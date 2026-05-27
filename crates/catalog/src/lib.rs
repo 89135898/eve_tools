@@ -1,5 +1,8 @@
-use evetools_db::{connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput};
-pub use evetools_db::{CatalogStatus, InventoryTypeView};
+use evetools_db::{
+    connect_pool, migrate_catalog_schema, CatalogImportProgress as DbCatalogImportProgress,
+    CatalogRepository, ImportCatalogInput,
+};
+pub use evetools_db::{CatalogImportTable, CatalogStatus, InventoryTypeView};
 use evetools_sde::{read_catalog_archive_from_bytes, SdeClient};
 use std::fmt;
 use thiserror::Error;
@@ -50,6 +53,44 @@ pub enum CatalogServiceError {
     SdeArchive(#[from] evetools_sde::SdeArchiveError),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogImportProgress {
+    CheckingLatestMetadata,
+    CheckingCurrentCatalog {
+        latest_build_number: i32,
+    },
+    AlreadyCurrent {
+        build_number: i32,
+    },
+    DownloadingArchive {
+        url: String,
+    },
+    DownloadedArchive {
+        byte_count: usize,
+    },
+    ParsingArchive,
+    ParsedArchive {
+        type_count: usize,
+        group_count: usize,
+        category_count: usize,
+        market_group_count: usize,
+    },
+    WritingCatalog,
+    WritingTableStarted {
+        table: CatalogImportTable,
+        total: usize,
+    },
+    WritingRows {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+    },
+    DeletingStaleRows,
+    Completed {
+        status: CatalogStatus,
+    },
+}
+
 impl CatalogConfig {
     pub fn from_database_url(value: impl Into<String>) -> Result<Self, CatalogServiceError> {
         let database_url = value.into();
@@ -83,22 +124,80 @@ impl CatalogService {
     }
 
     pub async fn import_latest(&self) -> Result<CatalogStatus, CatalogServiceError> {
+        self.import_latest_with_progress(|_| {}).await
+    }
+
+    pub async fn import_latest_with_progress<F>(
+        &self,
+        mut progress: F,
+    ) -> Result<CatalogStatus, CatalogServiceError>
+    where
+        F: FnMut(CatalogImportProgress),
+    {
         let client = SdeClient::official()?;
+        progress(CatalogImportProgress::CheckingLatestMetadata);
         let latest_metadata = client.latest_metadata().await?;
+        progress(CatalogImportProgress::CheckingCurrentCatalog {
+            latest_build_number: latest_metadata.build_number,
+        });
         let current_status = self.status().await?;
         if should_skip_latest_import(&current_status, latest_metadata.build_number) {
+            progress(CatalogImportProgress::AlreadyCurrent {
+                build_number: latest_metadata.build_number,
+            });
             return Ok(current_status);
         }
 
+        progress(CatalogImportProgress::DownloadingArchive {
+            url: OFFICIAL_SDE_ARCHIVE_URL.to_string(),
+        });
         let bytes = client.download_latest_archive().await?;
+        progress(CatalogImportProgress::DownloadedArchive {
+            byte_count: bytes.len(),
+        });
+        progress(CatalogImportProgress::ParsingArchive);
         let archive = read_catalog_archive_from_bytes(bytes)?;
+        progress(CatalogImportProgress::ParsedArchive {
+            type_count: archive.types.len(),
+            group_count: archive.groups.len(),
+            category_count: archive.categories.len(),
+            market_group_count: archive.market_groups.len(),
+        });
+        progress(CatalogImportProgress::WritingCatalog);
         Ok(self
             .repository
-            .import_archive(ImportCatalogInput {
-                archive: &archive,
-                source_url: OFFICIAL_SDE_ARCHIVE_URL,
-            })
-            .await?)
+            .import_archive_with_progress(
+                ImportCatalogInput {
+                    archive: &archive,
+                    source_url: OFFICIAL_SDE_ARCHIVE_URL,
+                },
+                |event| match event {
+                    DbCatalogImportProgress::TableStarted { table, total } => {
+                        progress(CatalogImportProgress::WritingTableStarted { table, total });
+                    }
+                    DbCatalogImportProgress::TableAdvanced {
+                        table,
+                        completed,
+                        total,
+                    } => {
+                        progress(CatalogImportProgress::WritingRows {
+                            table,
+                            completed,
+                            total,
+                        });
+                    }
+                    DbCatalogImportProgress::DeletingStaleRows => {
+                        progress(CatalogImportProgress::DeletingStaleRows);
+                    }
+                },
+            )
+            .await
+            .map(|status| {
+                progress(CatalogImportProgress::Completed {
+                    status: status.clone(),
+                });
+                status
+            })?)
     }
 
     pub async fn search_inventory_types(

@@ -6,6 +6,7 @@ use thiserror::Error;
 
 const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
+const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
 
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
@@ -48,6 +49,39 @@ pub struct ImportCatalogInput<'a> {
     pub source_url: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogImportTable {
+    Categories,
+    Groups,
+    MarketGroups,
+    Types,
+}
+
+impl CatalogImportTable {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Categories => "categories",
+            Self::Groups => "groups",
+            Self::MarketGroups => "market groups",
+            Self::Types => "types",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogImportProgress {
+    TableStarted {
+        table: CatalogImportTable,
+        total: usize,
+    },
+    TableAdvanced {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+    },
+    DeletingStaleRows,
+}
+
 #[derive(Clone)]
 pub struct CatalogRepository {
     pool: PgPool,
@@ -79,6 +113,17 @@ impl CatalogRepository {
         &self,
         input: ImportCatalogInput<'_>,
     ) -> Result<CatalogStatus, CatalogDbError> {
+        self.import_archive_with_progress(input, |_| {}).await
+    }
+
+    pub async fn import_archive_with_progress<F>(
+        &self,
+        input: ImportCatalogInput<'_>,
+        mut progress: F,
+    ) -> Result<CatalogStatus, CatalogDbError>
+    where
+        F: FnMut(CatalogImportProgress),
+    {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -109,10 +154,11 @@ impl CatalogRepository {
         .fetch_one(&mut *tx)
         .await?;
 
-        insert_categories(&mut tx, import_id, input.archive).await?;
-        insert_groups(&mut tx, import_id, input.archive).await?;
-        insert_market_groups(&mut tx, import_id, input.archive).await?;
-        insert_types(&mut tx, import_id, input.archive).await?;
+        insert_categories(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_groups(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_market_groups(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_types(&mut tx, import_id, input.archive, &mut progress).await?;
+        progress(CatalogImportProgress::DeletingStaleRows);
         delete_stale_catalog_rows(&mut tx, import_id).await?;
 
         sqlx::query(
@@ -397,12 +443,44 @@ fn search_pattern(query: &str) -> Option<String> {
     Some(pattern)
 }
 
+fn should_report_table_progress(completed: usize, total: usize) -> bool {
+    total > 0 && (completed == total || completed % TABLE_PROGRESS_REPORT_INTERVAL == 0)
+}
+
+fn report_table_started<F>(progress: &mut F, table: CatalogImportTable, total: usize)
+where
+    F: FnMut(CatalogImportProgress),
+{
+    progress(CatalogImportProgress::TableStarted { table, total });
+}
+
+fn report_table_progress<F>(
+    progress: &mut F,
+    table: CatalogImportTable,
+    completed: usize,
+    total: usize,
+) where
+    F: FnMut(CatalogImportProgress),
+{
+    if should_report_table_progress(completed, total) {
+        progress(CatalogImportProgress::TableAdvanced {
+            table,
+            completed,
+            total,
+        });
+    }
+}
+
 async fn insert_categories(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
     archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
 ) -> Result<(), sqlx::Error> {
-    for row in &archive.categories {
+    let table = CatalogImportTable::Categories;
+    let total = archive.categories.len();
+    report_table_started(progress, table, total);
+    for (index, row) in archive.categories.iter().enumerate() {
         sqlx::query(
             "INSERT INTO evetools_catalog.inventory_categories
                 (category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
@@ -423,6 +501,7 @@ async fn insert_categories(
         .bind(import_id)
         .execute(&mut **tx)
         .await?;
+        report_table_progress(progress, table, index + 1, total);
     }
     Ok(())
 }
@@ -431,8 +510,12 @@ async fn insert_groups(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
     archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
 ) -> Result<(), sqlx::Error> {
-    for row in &archive.groups {
+    let table = CatalogImportTable::Groups;
+    let total = archive.groups.len();
+    report_table_started(progress, table, total);
+    for (index, row) in archive.groups.iter().enumerate() {
         sqlx::query(
             "INSERT INTO evetools_catalog.inventory_groups
                 (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
@@ -455,6 +538,7 @@ async fn insert_groups(
         .bind(import_id)
         .execute(&mut **tx)
         .await?;
+        report_table_progress(progress, table, index + 1, total);
     }
     Ok(())
 }
@@ -463,8 +547,12 @@ async fn insert_market_groups(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
     archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
 ) -> Result<(), sqlx::Error> {
-    for row in &archive.market_groups {
+    let table = CatalogImportTable::MarketGroups;
+    let total = archive.market_groups.len();
+    report_table_started(progress, table, total);
+    for (index, row) in archive.market_groups.iter().enumerate() {
         sqlx::query(
             "INSERT INTO evetools_catalog.market_groups
                 (market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
@@ -492,6 +580,7 @@ async fn insert_market_groups(
         .bind(import_id)
         .execute(&mut **tx)
         .await?;
+        report_table_progress(progress, table, index + 1, total);
     }
     Ok(())
 }
@@ -500,8 +589,12 @@ async fn insert_types(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
     archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
 ) -> Result<(), sqlx::Error> {
-    for row in &archive.types {
+    let table = CatalogImportTable::Types;
+    let total = archive.types.len();
+    report_table_started(progress, table, total);
+    for (index, row) in archive.types.iter().enumerate() {
         sqlx::query(
             "INSERT INTO evetools_catalog.inventory_types
                 (type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
@@ -546,6 +639,7 @@ async fn insert_types(
         .bind(import_id)
         .execute(&mut **tx)
         .await?;
+        report_table_progress(progress, table, index + 1, total);
     }
     Ok(())
 }
@@ -656,5 +750,14 @@ mod tests {
         let status = successful_status(3_351_823, "test://same-build");
 
         assert!(successful_import_matches_input(&status, &input));
+    }
+
+    #[test]
+    fn table_progress_reports_every_interval_and_final_row() {
+        assert!(!should_report_table_progress(999, 2_500));
+        assert!(should_report_table_progress(1_000, 2_500));
+        assert!(!should_report_table_progress(1_001, 2_500));
+        assert!(should_report_table_progress(2_000, 2_500));
+        assert!(should_report_table_progress(2_500, 2_500));
     }
 }

@@ -116,3 +116,38 @@ git diff --check
 ```
 
 Expected: all pass.
+
+## Task 5: Add CLI Progress Output
+
+**Files:**
+
+- Modify: `crates/db/src/catalog.rs`
+- Modify: `crates/db/src/lib.rs`
+- Modify: `crates/catalog/src/lib.rs`
+- Modify: `crates/catalog/src/bin/import-sde-latest.rs`
+- Modify: `README.md`
+
+- [ ] **Step 1: Add failing progress tests**
+
+Add one DB unit test for row progress throttling and one CLI unit test for formatting row progress and downloaded archive size.
+
+- [ ] **Step 2: Implement progress events**
+
+Add table progress events in `evetools-db`, expose catalog service progress events in `evetools-catalog`, and keep existing no-progress methods as wrappers.
+
+- [ ] **Step 3: Print progress in CLI**
+
+Update `import-sde-latest` to call `CatalogService::import_latest_with_progress()` and format each emitted event.
+
+- [ ] **Step 4: Verify workspace**
+
+Run:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+pnpm --filter @evetools/desktop typecheck
+git diff --check
+```
+
+Expected: all pass.
