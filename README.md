@@ -1,125 +1,121 @@
 # EveTools
 
-EveTools is a desktop-first EVE Online station trading assistant focused on Jita 4-4.
+EveTools 是一个桌面优先的 EVE Online 空间站交易辅助工具，当前聚焦 Jita 4-4。
 
-The current implementation slice provides:
+当前实现切片包含：
 
-- Tauri 2 desktop shell
-- React/Vite desktop UI
-- Rust workspace crates for domain logic, ESI, Supabase catalog data, and workers
-- Tested Rust domain calculations for spread, fees, liquidity, and attention scoring
-- Public ESI-backed market price lookup with fixture fallback
-- Public ESI-backed selection discovery with fixture fallback
-- Fixture-backed order monitor
+- Tauri 2 桌面壳
+- React/Vite 桌面 UI
+- 面向领域逻辑、ESI、Supabase catalog 数据和 worker 的 Rust workspace crates
+- 已测试的 Rust 领域计算：价差、手续费、流动性和关注度评分
+- 基于公开 ESI 的市场价格查询，并带 fixture fallback
+- 基于公开 ESI 的选品发现，并带 fixture fallback
+- 基于 fixture 的订单监控
 
-This slice uses live public ESI for market lookup and selection discovery when available, while keeping deterministic fixture fallback for development and outages. Static SDE catalog data is imported into Supabase Postgres through the Rust catalog service. EVE SSO and authenticated character-order sync are deferred to later implementation phases.
+当前切片在可用时使用公开 ESI 做市场查询和选品发现，同时保留确定性的 fixture fallback 以便开发和故障降级。静态 SDE catalog 数据通过 Rust catalog service 导入 Supabase Postgres。EVE SSO 和认证角色订单同步会在后续实现阶段处理。
 
-## Development
+## 开发
 
-Install dependencies:
+安装依赖：
 
 ```sh
 pnpm install
 ```
 
-Run all checks:
+运行全部检查：
 
 ```sh
 pnpm check
 ```
 
-Run Rust tests only:
+只运行 Rust 测试：
 
 ```sh
 pnpm test:rust
 ```
 
-Run TypeScript type checking only:
+只运行 TypeScript 类型检查：
 
 ```sh
 pnpm typecheck
 ```
 
-Start the desktop app:
+启动桌面应用：
 
 ```sh
 pnpm dev
 ```
 
-Build the desktop app:
+构建桌面应用：
 
 ```sh
 pnpm build
 ```
 
-## Public ESI Market Sync
+## 公开 ESI 市场同步
 
-The desktop app can use live public ESI data for the Jita market lookup and selection board.
+桌面应用可以使用公开 ESI 数据驱动 Jita 市场查询和选品看板。
 
-Market source mode is controlled by `EVETOOLS_MARKET_SOURCE`:
+市场数据源由 `EVETOOLS_MARKET_SOURCE` 控制：
 
 ```bash
 EVETOOLS_MARKET_SOURCE=live pnpm dev
 EVETOOLS_MARKET_SOURCE=fixture pnpm dev
 ```
 
-When the variable is omitted, the backend uses `live`.
+未设置该变量时，后端默认使用 `live`。
 
-Public ESI mode currently uses these unauthenticated endpoints:
+公开 ESI 模式当前使用这些无需认证的 endpoints：
 
 - `POST /universe/ids/`
 - `GET /universe/types/{type_id}/`
 - `GET /markets/{region_id}/orders/`
 - `GET /markets/{region_id}/history/`
 
-The current public slice is intentionally small:
+当前公开数据切片刻意保持较小范围：
 
-- The Forge region only.
-- Jita 4-4 station orders only for top-of-book analysis.
-- A fixed seed pool for selection discovery.
-- Fixture fallback on public ESI network, status, or decode failure.
+- 只覆盖 The Forge 区域。
+- 只使用 Jita 4-4 空间站订单做 top-of-book 分析。
+- 选品发现使用固定种子池。
+- 公开 ESI 网络、状态码或解码失败时使用 fixture fallback。
 
-Authenticated character order monitoring remains fixture-backed until the SSO phase.
+认证角色订单监控在 SSO 阶段前仍由 fixture 驱动。
 
-## Static SDE Catalog
+## 静态 SDE Catalog
 
-EveTools imports CCP's official SDE JSON Lines archive into Supabase Postgres through the Rust catalog service.
+EveTools 通过 Rust catalog service 将 CCP 官方 SDE JSON Lines 压缩包导入 Supabase Postgres。
 
-### Database Connection
+### 数据库连接
 
-Set the catalog database URL in your local shell before starting the desktop app:
+启动桌面应用前，在本地 shell 中设置 catalog 数据库 URL：
 
 ```bash
 export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
 pnpm dev
 ```
 
-Use a connection string from the Supabase Dashboard's `Connect` panel. See Supabase's [database connection guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers) when choosing between direct connections and poolers. For catalog import work, prefer one of these connection modes:
+连接串从 Supabase Dashboard 的 `Connect` 面板获取。选择 direct connection 和 pooler 时，可参考 Supabase 的 [database connection guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers)。对于 catalog 导入，优先使用以下连接方式：
 
-- Direct Postgres connection with SSL enabled. This is the preferred mode for local/admin imports because the importer runs migrations and long transactions.
-- Supavisor session pooler if your local network cannot reach the direct IPv6 endpoint.
-- Do not use the transaction pooler for this importer. The importer uses long transactions and `sqlx`; transaction pooling is intended for short-lived/serverless traffic and can conflict with prepared-statement behavior.
+- 启用 SSL 的 Direct Postgres connection。这是本地/admin 导入的首选方式，因为 importer 会执行 migration 和长事务。
+- 如果本地网络无法访问 direct IPv6 endpoint，可以使用 Supavisor session pooler。
+- 不要把 transaction pooler 用于这个 importer。Importer 使用长事务和 `sqlx`；transaction pooling 更适合短生命周期/serverless 流量，并且可能与 prepared statement 行为冲突。
 
-The URL must include SSL. Use `?sslmode=require` when there are no query parameters, or append `&sslmode=require` if the URL already has query parameters. If you configure Supabase SSL enforcement and install the project CA certificate locally, `sslmode=verify-full` is stronger.
+URL 必须启用 SSL。没有 query 参数时使用 `?sslmode=require`；如果 URL 已有 query 参数，则追加 `&sslmode=require`。如果你已在 Supabase 启用 SSL enforcement，并在本地安装了项目 CA 证书，`sslmode=verify-full` 更强。
 
-For repository integration tests that should touch Postgres, set a separate test URL:
+需要让 repository integration tests 真实访问 Postgres 时，使用单独的测试 URL：
 
 ```bash
 export EVETOOLS_TEST_DATABASE_URL="<dev-or-test-supabase-postgres-url-with-sslmode-require>"
 cargo test -p evetools-db --test catalog_repository -- --nocapture
 ```
 
-When `EVETOOLS_TEST_DATABASE_URL` is not set, Postgres integration tests skip themselves. The importer owns the `evetools_catalog` schema and replaces catalog rows for each successful import, so use a development or disposable Supabase project for tests.
+未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。Importer 拥有 `evetools_catalog` schema，并会在每次成功导入后替换 catalog rows，所以测试请使用开发用或可丢弃的 Supabase project。
 
-Do not commit real database URLs or passwords. Do not store them in checked-in `.env` files. If a credential is pasted into chat, logs, screenshots, or source control, rotate it in Supabase before use.
+不要提交真实数据库 URL 或密码。不要把它们放进已纳入版本控制的 `.env` 文件。如果凭据出现在聊天、日志、截图或源码控制中，请先在 Supabase 中轮换后再使用。
 
-Direct Supabase Postgres mode is only for local, private, or admin catalog imports.
-`EVETOOLS_DATABASE_URL` is a privileged credential: do not bundle it into the Tauri app,
-inject it for end users, or require end users to hold it. Before production distribution,
-replace direct database access with a hosted API, Supabase Edge Function, or a strictly
-RLS-enforced read-only path.
+Direct Supabase Postgres 模式只适用于本地、私有或 admin catalog 导入。`EVETOOLS_DATABASE_URL` 是特权凭据：不要把它打包进 Tauri app，不要注入给最终用户，也不要要求最终用户持有它。正式分发前，必须把直接数据库访问替换为 hosted API、Supabase Edge Function，或严格由 RLS 约束的只读路径。
 
-The first catalog slice imports:
+第一版 catalog 切片导入：
 
 - `_sde.jsonl`
 - `types.jsonl`
@@ -127,53 +123,53 @@ The first catalog slice imports:
 - `categories.jsonl`
 - `marketGroups.jsonl`
 
-React does not connect to Supabase directly. It calls Tauri commands, and Tauri calls the Rust catalog service.
+React 不直接连接 Supabase。React 调用 Tauri commands，Tauri 再调用 Rust catalog service。
 
-## Architecture
+## 架构
 
-Business logic lives in Rust crates:
+业务逻辑位于 Rust crates：
 
-- `crates/domain`: market models, price calculations, scoring, serialized view models, and fixtures.
-- `crates/esi`: ESI client boundary shell.
-- `crates/sde`: SDE JSON Lines archive discovery and record parsing.
-- `crates/db`: Supabase/Postgres catalog schema and repository.
-- `crates/catalog`: Rust catalog service for importing and querying static SDE data.
-- `crates/worker`: sync status and worker boundary shell.
+- `crates/domain`：市场模型、价格计算、评分、序列化 view models 和 fixtures。
+- `crates/esi`：ESI client 边界。
+- `crates/sde`：SDE JSON Lines 压缩包发现和记录解析。
+- `crates/db`：Supabase/Postgres catalog schema 和 repository。
+- `crates/catalog`：用于导入和查询静态 SDE 数据的 Rust catalog service。
+- `crates/worker`：同步状态和 worker 边界。
 
-The desktop app lives in `apps/desktop`:
+桌面应用位于 `apps/desktop`：
 
-- `apps/desktop/src`: React UI and typed Tauri command wrappers.
-- `apps/desktop/src-tauri`: Tauri 2 Rust crate and command handlers.
+- `apps/desktop/src`：React UI 和 typed Tauri command wrappers。
+- `apps/desktop/src-tauri`：Tauri 2 Rust crate 和 command handlers。
 
-React renders prepared views and calls Tauri commands. Tauri commands are adapters over Rust crates; trading calculations should stay in `crates/domain`.
+React 渲染后端准备好的 views，并调用 Tauri commands。Tauri commands 是 Rust crates 的适配层；交易计算应保留在 `crates/domain` 中。
 
-## MVP Surfaces
+## MVP 界面
 
-The first desktop screen exposes three surfaces:
+第一个桌面屏幕包含三个界面：
 
-- `Market Price Lookup`: lookup current Jita price state for an item.
-- `Selection Discovery`: list candidate items with entry, exit, net profit, scores, and reasons.
-- `Order Monitor`: list active-order-style fixture rows with recommended action and urgency.
+- `Market Price Lookup`：查询某个物品当前 Jita 价格状态。
+- `Selection Discovery`：列出候选物品及入场价、出场价、净利润、评分和理由。
+- `Order Monitor`：展示类似活跃订单的 fixture rows，并给出建议动作和紧急度。
 
-Sync status is split between public and private flows:
+同步状态分为公开和私有流程：
 
-- Public market sync: `live-ready`, `fixture-ready`, or `fixture-fallback`
-- Authenticated order sync: `not-authorized`
-- Data source: `live` or `fixture`
+- Public market sync：`live-ready`、`fixture-ready` 或 `fixture-fallback`
+- Authenticated order sync：`not-authorized`
+- Data source：`live` 或 `fixture`
 
-## Scope
+## 范围
 
-In scope for this foundation:
+当前 foundation 范围内：
 
-- Local Tauri desktop shell.
-- Public ESI-backed market lookup and selection discovery.
-- Fixture fallback command boundary.
-- React UI wired to Tauri commands.
-- Deterministic, testable Rust domain calculations.
+- 本地 Tauri 桌面壳。
+- 基于公开 ESI 的市场查询和选品发现。
+- Fixture fallback command 边界。
+- 连接到 Tauri commands 的 React UI。
+- 确定性、可测试的 Rust 领域计算。
 
-Out of scope for this foundation:
+当前 foundation 范围外：
 
-- Full trading persistence beyond the Supabase static SDE catalog.
-- EVE SSO token handling.
-- Authenticated character order synchronization.
-- Automated market order placement, modification, or cancellation.
+- Supabase 静态 SDE catalog 之外的完整交易持久化。
+- EVE SSO token 处理。
+- 认证角色订单同步。
+- 自动下单、改单或撤单。
