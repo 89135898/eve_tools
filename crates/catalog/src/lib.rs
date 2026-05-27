@@ -6,6 +6,7 @@ pub use evetools_db::{CatalogImportTable, CatalogStatus, InventoryTypeView};
 use evetools_sde::{read_catalog_archive_from_bytes, SdeClient};
 use std::fmt;
 use thiserror::Error;
+use url::Url;
 
 const OFFICIAL_SDE_ARCHIVE_URL: &str =
     "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
@@ -13,6 +14,7 @@ const MIN_COMPLETE_OFFICIAL_TYPE_COUNT: i64 = 10_000;
 const MIN_COMPLETE_OFFICIAL_GROUP_COUNT: i64 = 500;
 const MIN_COMPLETE_OFFICIAL_CATEGORY_COUNT: i64 = 20;
 const MIN_COMPLETE_OFFICIAL_MARKET_GROUP_COUNT: i64 = 1_000;
+const SUPABASE_TRANSACTION_POOLER_PORT: Option<u16> = Some(6543);
 
 #[derive(Clone)]
 /// Catalog database connection configuration.
@@ -43,6 +45,10 @@ impl fmt::Debug for CatalogConfig {
 pub enum CatalogServiceError {
     #[error("EVETOOLS_DATABASE_URL is required")]
     MissingDatabaseUrl,
+    #[error(
+        "EVETOOLS_DATABASE_URL uses the Supabase transaction pooler on port 6543; use the direct connection or session pooler for catalog imports"
+    )]
+    UnsupportedTransactionPooler,
     #[error("database error: {0}")]
     Database(#[from] evetools_db::CatalogDbError),
     #[error("sql migration or connection error: {0}")]
@@ -97,12 +103,27 @@ impl CatalogConfig {
         if database_url.trim().is_empty() {
             return Err(CatalogServiceError::MissingDatabaseUrl);
         }
+        reject_transaction_pooler(&database_url)?;
         Ok(Self { database_url })
     }
 
     pub fn from_env() -> Result<Self, CatalogServiceError> {
         Self::from_database_url(std::env::var("EVETOOLS_DATABASE_URL").unwrap_or_default())
     }
+}
+
+fn reject_transaction_pooler(database_url: &str) -> Result<(), CatalogServiceError> {
+    let Ok(url) = Url::parse(database_url) else {
+        return Ok(());
+    };
+    if url
+        .host_str()
+        .is_some_and(|host| host.ends_with(".pooler.supabase.com"))
+        && url.port_or_known_default() == SUPABASE_TRANSACTION_POOLER_PORT
+    {
+        return Err(CatalogServiceError::UnsupportedTransactionPooler);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]

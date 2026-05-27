@@ -11,3 +11,4 @@ evetools-sde = { path = "../sde" }
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true

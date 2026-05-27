@@ -8,6 +8,10 @@ const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
 const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
 const IMPORT_BATCH_SIZE: usize = 500;
+const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &[
+    "SET LOCAL idle_in_transaction_session_timeout = '60s'",
+    "SET LOCAL statement_timeout = '120s'",
+];
 
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
@@ -165,6 +169,13 @@ impl CatalogRepository {
         F: FnMut(CatalogImportProgress),
     {
         let mut tx = self.pool.begin().await?;
+
+        for statement in IMPORT_TRANSACTION_SETUP_STATEMENTS {
+            sqlx::query(statement)
+                .persistent(false)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .persistent(false)
@@ -1220,6 +1231,16 @@ mod tests {
         let batch_sizes: Vec<usize> = import_batches(&rows).map(<[_]>::len).collect();
 
         assert_eq!(batch_sizes, vec![IMPORT_BATCH_SIZE, IMPORT_BATCH_SIZE, 1]);
+    }
+
+    #[test]
+    fn import_transaction_timeout_settings_are_configured() {
+        assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
+            .iter()
+            .any(|statement| statement.contains("idle_in_transaction_session_timeout")));
+        assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
+            .iter()
+            .any(|statement| statement.contains("statement_timeout")));
     }
 
     #[test]
