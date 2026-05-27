@@ -96,9 +96,9 @@ pnpm dev
 
 连接串从 Supabase Dashboard 的 `Connect` 面板获取。选择 direct connection 和 pooler 时，可参考 Supabase 的 [database connection guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers)。对于 catalog 导入，优先使用以下连接方式：
 
-- 启用 SSL 的 Direct Postgres connection。这是本地/admin 导入的首选方式，因为 importer 会执行 migration 和长事务。
+- 启用 SSL 的 Direct Postgres connection。这是本地/admin 导入的首选方式。
 - 如果本地网络无法访问 direct IPv6 endpoint，可以使用 Supavisor session pooler。
-- 不要把 transaction pooler 用于这个 importer。Importer 使用长事务；transaction pooling 更适合短生命周期/serverless 流量，可能让导入停在 `idle in transaction`。CLI 会拒绝 `*.pooler.supabase.com:6543` 这类 URL。
+- 不要把 transaction pooler 用于这个 importer。Importer 需要稳定的 session 语义并执行批量写入；transaction pooling 更适合短生命周期/serverless 流量，可能让导入停在 `idle in transaction`。CLI 会拒绝 `*.pooler.supabase.com:6543` 这类 URL。
 
 URL 必须启用 SSL。没有 query 参数时使用 `?sslmode=require`；如果 URL 已有 query 参数，则追加 `&sslmode=require`。如果你已在 Supabase 启用 SSL enforcement，并在本地安装了项目 CA 证书，`sslmode=verify-full` 更强。
 
@@ -122,7 +122,7 @@ cargo run -p evetools-catalog --bin import-sde-latest
 
 CLI 会显示阶段级进度：检查 SDE metadata、检查当前 catalog、下载完成大小、解析后的行数、写入 Postgres 的分表行数，以及最终状态。下载阶段第一版不显示百分比；写库阶段每 1000 行和每张表最后一行报告一次。
 
-如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断，当前导入事务会回滚。当前 importer 会拒绝 transaction pooler，并在导入事务内设置语句超时，避免单条 SQL 无限等待。
+如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断。当前 importer 会拒绝 transaction pooler，并将写入拆成表级短事务；每张表事务会设置语句超时和 idle-in-transaction 超时，遇到连接卡住时最多重试 3 次，最后才标记导入成功。
 
 SDE 实体名和描述会导入到标准化 localization 表中。`get_inventory_type` 和 `search_inventory_types` 在服务端根据请求语言选择显示名，前端只传当前语言，不解析 SDE 多语言 JSON。语言 fallback 顺序为精确语言、基础语言、中文 fallback、英文 fallback，再退回任意可用名称。升级到包含 localization 表的版本后，需要重新运行一次完整 SDE 导入来填充这些表。
 

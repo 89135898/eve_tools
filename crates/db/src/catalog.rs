@@ -1,14 +1,20 @@
 use chrono::Utc;
 use evetools_sde::CatalogArchive;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{
+    pool::PoolConnection, postgres::PgRow, PgPool, Postgres, QueryBuilder, Row, Transaction,
+};
 use thiserror::Error;
 
 const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
 const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
 const IMPORT_BATCH_SIZE: usize = 500;
-const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &["SET LOCAL statement_timeout = '120s'"];
+const IMPORT_TABLE_MAX_ATTEMPTS: usize = 3;
+const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &[
+    "SET LOCAL idle_in_transaction_session_timeout = '60s'",
+    "SET LOCAL statement_timeout = '120s'",
+];
 
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
@@ -165,21 +171,26 @@ impl CatalogRepository {
     where
         F: FnMut(CatalogImportProgress),
     {
-        let mut tx = self.pool.begin().await?;
+        let mut lock = acquire_import_lock(&self.pool).await?;
+        let result = self.import_archive_with_lock(input, &mut progress).await;
+        let unlock_result = release_import_lock(&mut lock).await;
 
-        for statement in IMPORT_TRANSACTION_SETUP_STATEMENTS {
-            sqlx::query(statement)
-                .persistent(false)
-                .execute(&mut *tx)
-                .await?;
+        match (result, unlock_result) {
+            (Ok(status), Ok(())) => Ok(status),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
         }
+    }
 
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .persistent(false)
-            .bind(CATALOG_IMPORT_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
-
+    async fn import_archive_with_lock<F>(
+        &self,
+        input: ImportCatalogInput<'_>,
+        progress: &mut F,
+    ) -> Result<CatalogStatus, CatalogDbError>
+    where
+        F: FnMut(CatalogImportProgress),
+    {
+        let mut tx = begin_import_transaction(&self.pool).await?;
         if let Some(build_number) = input.archive.metadata.build_number {
             if let Some(successful_import) =
                 latest_success_status_for_build(&mut tx, build_number).await?
@@ -206,17 +217,27 @@ impl CatalogRepository {
         .bind(input.source_url)
         .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
 
-        insert_categories(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_category_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_groups(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_group_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_market_groups(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_market_group_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_types(&mut tx, import_id, input.archive, &mut progress).await?;
-        insert_type_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
-        progress(CatalogImportProgress::DeletingStaleRows);
-        delete_stale_catalog_rows(&mut tx, import_id).await?;
+        let result = async {
+            import_categories(&self.pool, import_id, input.archive, progress).await?;
+            import_category_localizations(&self.pool, import_id, input.archive, progress).await?;
+            import_groups(&self.pool, import_id, input.archive, progress).await?;
+            import_group_localizations(&self.pool, import_id, input.archive, progress).await?;
+            import_market_groups(&self.pool, import_id, input.archive, progress).await?;
+            import_market_group_localizations(&self.pool, import_id, input.archive, progress)
+                .await?;
+            import_types(&self.pool, import_id, input.archive, progress).await?;
+            import_type_localizations(&self.pool, import_id, input.archive, progress).await?;
+            progress(CatalogImportProgress::DeletingStaleRows);
+            import_delete_stale_catalog_rows(&self.pool, import_id).await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = mark_import_failed(&self.pool, import_id, &error.to_string()).await;
+            return Err(error.into());
+        }
 
         sqlx::query(
             "UPDATE evetools_catalog.sde_imports
@@ -231,10 +252,8 @@ impl CatalogRepository {
         .bind(input.archive.categories.len() as i64)
         .bind(input.archive.market_groups.len() as i64)
         .bind(import_id)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await?;
-
-        tx.commit().await?;
         self.status_by_import_id(import_id).await
     }
 
@@ -409,19 +428,18 @@ async fn latest_success_status_for_build(
         "SELECT import_id, status, build_number, release_date, source_url, completed_at, error_summary,
                 type_count, group_count, category_count, market_group_count
          FROM evetools_catalog.sde_imports
+         WHERE status = 'success' AND build_number = $1
          ORDER BY import_id DESC
          LIMIT 1",
     )
     .persistent(false)
+    .bind(build_number)
     .fetch_optional(&mut **tx)
     .await?;
 
     let Some(row) = row else {
         return Ok(None);
     };
-    if row.1 != "success" || row.2 != Some(build_number) {
-        return Ok(None);
-    }
     let import_id = row.0;
     let status = catalog_status_from_record((
         row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
@@ -495,6 +513,36 @@ async fn localization_counts_match_input(
 ) -> Result<bool, sqlx::Error> {
     let actual = localization_counts_for_import(tx, import_id).await?;
     Ok(actual == expected_localization_counts(input.archive))
+}
+
+async fn acquire_import_lock(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .persistent(false)
+        .bind(CATALOG_IMPORT_LOCK_KEY)
+        .execute(&mut *connection)
+        .await?;
+    Ok(connection)
+}
+
+async fn release_import_lock(connection: &mut PoolConnection<Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .persistent(false)
+        .bind(CATALOG_IMPORT_LOCK_KEY)
+        .execute(&mut **connection)
+        .await?;
+    Ok(())
+}
+
+async fn begin_import_transaction(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for statement in IMPORT_TRANSACTION_SETUP_STATEMENTS {
+        sqlx::query(statement)
+            .persistent(false)
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(tx)
 }
 
 const TYPE_SELECT_SQL: &str = "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
@@ -719,6 +767,53 @@ fn report_table_progress<F>(
         });
     }
 }
+
+macro_rules! define_import_table {
+    ($wrapper_name:ident, $insert_name:ident) => {
+        async fn $wrapper_name(
+            pool: &PgPool,
+            import_id: i64,
+            archive: &CatalogArchive,
+            progress: &mut impl FnMut(CatalogImportProgress),
+        ) -> Result<(), sqlx::Error> {
+            let mut attempt = 1;
+            loop {
+                let mut tx = begin_import_transaction(pool).await?;
+                match $insert_name(&mut tx, import_id, archive, progress).await {
+                    Ok(()) => match tx.commit().await {
+                        Ok(()) => return Ok(()),
+                        Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => return Err(error),
+                        Err(_) => {
+                            attempt += 1;
+                            continue;
+                        }
+                    },
+                    Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        let _ = tx.rollback().await;
+                        attempt += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+    };
+}
+
+define_import_table!(import_categories, insert_categories);
+define_import_table!(import_category_localizations, insert_category_localizations);
+define_import_table!(import_groups, insert_groups);
+define_import_table!(import_group_localizations, insert_group_localizations);
+define_import_table!(import_market_groups, insert_market_groups);
+define_import_table!(
+    import_market_group_localizations,
+    insert_market_group_localizations
+);
+define_import_table!(import_types, insert_types);
+define_import_table!(import_type_localizations, insert_type_localizations);
 
 async fn insert_categories(
     tx: &mut Transaction<'_, Postgres>,
@@ -1115,6 +1210,54 @@ async fn delete_stale_catalog_rows(
     Ok(())
 }
 
+async fn import_delete_stale_catalog_rows(
+    pool: &PgPool,
+    import_id: i64,
+) -> Result<(), sqlx::Error> {
+    let mut attempt = 1;
+    loop {
+        let mut tx = begin_import_transaction(pool).await?;
+        match delete_stale_catalog_rows(&mut tx, import_id).await {
+            Ok(()) => match tx.commit().await {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => return Err(error),
+                Err(_) => {
+                    attempt += 1;
+                    continue;
+                }
+            },
+            Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = tx.rollback().await;
+                attempt += 1;
+                continue;
+            }
+        }
+    }
+}
+
+async fn mark_import_failed(
+    pool: &PgPool,
+    import_id: i64,
+    error_summary: &str,
+) -> Result<(), sqlx::Error> {
+    let error_summary: String = error_summary.chars().take(1_000).collect();
+    sqlx::query(
+        "UPDATE evetools_catalog.sde_imports
+         SET completed_at = NOW(), status = 'failed', error_summary = $1
+         WHERE import_id = $2",
+    )
+    .persistent(false)
+    .bind(error_summary)
+    .bind(import_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 const DELETE_STALE_CATALOG_ROWS_STATEMENTS: &[&str] = &[
     "DELETE FROM evetools_catalog.inventory_type_localizations WHERE updated_import_id <> $1",
     "DELETE FROM evetools_catalog.market_group_localizations WHERE updated_import_id <> $1",
@@ -1231,8 +1374,9 @@ mod tests {
     }
 
     #[test]
-    fn import_transaction_setup_keeps_long_imports_from_idle_timeout() {
-        assert!(!IMPORT_TRANSACTION_SETUP_STATEMENTS
+    fn import_table_transactions_are_bounded_and_retried() {
+        assert!(IMPORT_TABLE_MAX_ATTEMPTS > 1);
+        assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
             .iter()
             .any(|statement| statement.contains("idle_in_transaction_session_timeout")));
         assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
