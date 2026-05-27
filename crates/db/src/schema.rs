@@ -17,12 +17,16 @@ pub async fn connect_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
 pub async fn migrate_catalog_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .persistent(false)
         .bind(CATALOG_MIGRATION_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
 
     for statement in CATALOG_SCHEMA_STATEMENTS {
-        sqlx::query(statement).execute(&mut *tx).await?;
+        sqlx::query(statement)
+            .persistent(false)
+            .execute(&mut *tx)
+            .await?;
     }
 
     tx.commit().await?;

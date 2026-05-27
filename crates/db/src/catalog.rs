@@ -66,6 +66,7 @@ impl CatalogRepository {
              ORDER BY import_id DESC
              LIMIT 1",
         )
+        .persistent(false)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -81,6 +82,7 @@ impl CatalogRepository {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .persistent(false)
             .bind(CATALOG_IMPORT_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
@@ -98,6 +100,7 @@ impl CatalogRepository {
              VALUES ($1, $2, $3, NOW(), 'running')
              RETURNING import_id",
         )
+        .persistent(false)
         .bind(input.archive.metadata.build_number)
         .bind(input.archive.metadata.release_date.as_deref())
         .bind(input.source_url)
@@ -117,6 +120,7 @@ impl CatalogRepository {
                  category_count = $3, market_group_count = $4
              WHERE import_id = $5",
         )
+        .persistent(false)
         .bind(input.archive.types.len() as i64)
         .bind(input.archive.groups.len() as i64)
         .bind(input.archive.categories.len() as i64)
@@ -135,6 +139,7 @@ impl CatalogRepository {
         language: &str,
     ) -> Result<Option<InventoryTypeView>, CatalogDbError> {
         let row = sqlx::query_as::<_, InventoryTypeRow>(TYPE_SELECT_SQL)
+            .persistent(false)
             .bind(type_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -168,6 +173,7 @@ impl CatalogRepository {
              ORDER BY t.name_en NULLS LAST
              LIMIT $2",
         )
+        .persistent(false)
         .bind(pattern)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -185,6 +191,7 @@ impl CatalogRepository {
              FROM evetools_catalog.sde_imports
              WHERE import_id = $1",
         )
+        .persistent(false)
         .bind(import_id)
         .fetch_one(&self.pool)
         .await?;
@@ -247,6 +254,7 @@ async fn latest_success_status_for_build(
          ORDER BY import_id DESC
          LIMIT 1",
     )
+    .persistent(false)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -394,6 +402,7 @@ async fn insert_categories(
                 raw_name_json = EXCLUDED.raw_name_json,
                 updated_import_id = EXCLUDED.updated_import_id",
         )
+        .persistent(false)
         .bind(row.category_id)
         .bind(row.published)
         .bind(row.name_en.as_deref())
@@ -424,6 +433,7 @@ async fn insert_groups(
                 raw_name_json = EXCLUDED.raw_name_json,
                 updated_import_id = EXCLUDED.updated_import_id",
         )
+        .persistent(false)
         .bind(row.group_id)
         .bind(row.category_id)
         .bind(row.published)
@@ -458,6 +468,7 @@ async fn insert_market_groups(
                 raw_description_json = EXCLUDED.raw_description_json,
                 updated_import_id = EXCLUDED.updated_import_id",
         )
+        .persistent(false)
         .bind(row.market_group_id)
         .bind(row.parent_group_id)
         .bind(row.name_en.as_deref())
@@ -503,6 +514,7 @@ async fn insert_types(
                 raw_description_json = EXCLUDED.raw_description_json,
                 updated_import_id = EXCLUDED.updated_import_id",
         )
+        .persistent(false)
         .bind(row.type_id)
         .bind(row.group_id)
         .bind(row.market_group_id)
@@ -532,6 +544,7 @@ async fn delete_stale_catalog_rows(
 ) -> Result<(), sqlx::Error> {
     for statement in DELETE_STALE_CATALOG_ROWS_STATEMENTS {
         sqlx::query(statement)
+            .persistent(false)
             .bind(import_id)
             .execute(&mut **tx)
             .await?;

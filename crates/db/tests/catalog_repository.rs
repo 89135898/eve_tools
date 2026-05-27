@@ -165,6 +165,7 @@ async fn importing_same_successful_build_returns_current_status_without_new_impo
          FROM evetools_catalog.sde_imports
          WHERE build_number = $1 AND status = 'success'",
     )
+    .persistent(false)
     .bind(archive.metadata.build_number)
     .fetch_one(&pool)
     .await
@@ -182,6 +183,7 @@ async fn importing_same_successful_build_returns_current_status_without_new_impo
          FROM evetools_catalog.sde_imports
          WHERE build_number = $1 AND status = 'success'",
     )
+    .persistent(false)
     .bind(archive.metadata.build_number)
     .fetch_one(&pool)
     .await
