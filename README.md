@@ -122,7 +122,7 @@ cargo run -p evetools-catalog --bin import-sde-latest
 
 CLI 会显示阶段级进度：检查 SDE metadata、检查当前 catalog、下载完成大小、解析后的行数、写入 Postgres 的分表行数，以及最终状态。下载阶段第一版不显示百分比；写库阶段每 1000 行和每张表最后一行报告一次。
 
-如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断，当前导入事务会回滚。当前 importer 会在导入事务内设置数据库超时，避免长时间打开空闲事务。
+如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断，当前导入事务会回滚。当前 importer 会拒绝 transaction pooler，并在导入事务内设置语句超时，避免单条 SQL 无限等待。
 
 SDE 实体名和描述会导入到标准化 localization 表中。`get_inventory_type` 和 `search_inventory_types` 在服务端根据请求语言选择显示名，前端只传当前语言，不解析 SDE 多语言 JSON。语言 fallback 顺序为精确语言、基础语言、中文 fallback、英文 fallback，再退回任意可用名称。升级到包含 localization 表的版本后，需要重新运行一次完整 SDE 导入来填充这些表。
 

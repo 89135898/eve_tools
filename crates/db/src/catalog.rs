@@ -8,10 +8,7 @@ const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
 const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
 const IMPORT_BATCH_SIZE: usize = 500;
-const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &[
-    "SET LOCAL idle_in_transaction_session_timeout = '60s'",
-    "SET LOCAL statement_timeout = '120s'",
-];
+const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &["SET LOCAL statement_timeout = '120s'"];
 
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
@@ -1234,8 +1231,8 @@ mod tests {
     }
 
     #[test]
-    fn import_transaction_timeout_settings_are_configured() {
-        assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
+    fn import_transaction_setup_keeps_long_imports_from_idle_timeout() {
+        assert!(!IMPORT_TRANSACTION_SETUP_STATEMENTS
             .iter()
             .any(|statement| statement.contains("idle_in_transaction_session_timeout")));
         assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
