@@ -1,0 +1,93 @@
+# Catalog Import Entrypoints Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make official SDE import reusable through `CatalogService` while adding a thin admin CLI for bootstrap and recovery.
+
+**Architecture:** `CatalogService::import_latest()` owns official import behavior and skip decisions. The CLI is a binary entrypoint in the `evetools-catalog` package and only calls the service. Future scheduled jobs can reuse the same service method.
+
+**Tech Stack:** Rust 1.82, `tokio`, `sqlx`, Supabase Postgres via `EVETOOLS_DATABASE_URL`, existing `evetools-catalog`, `evetools-db`, and `evetools-sde` crates.
+
+---
+
+## Task 1: Guard Official Import Skip Logic
+
+**Files:**
+
+- Modify: `crates/catalog/src/lib.rs`
+
+- [ ] **Step 1: Write failing tests**
+
+Add tests proving that a fixture-sized status with the official latest build must not skip, while a complete official status can skip.
+
+- [ ] **Step 2: Run test to verify failure**
+
+Run:
+
+```bash
+cargo test -p evetools-catalog import_skip
+```
+
+Expected: fail because the helper does not exist.
+
+- [ ] **Step 3: Implement helper and wire it into `import_latest()`**
+
+Add a private helper that checks status, build number, source URL, and row-count thresholds before skipping.
+
+- [ ] **Step 4: Run catalog tests**
+
+Run:
+
+```bash
+cargo test -p evetools-catalog
+```
+
+Expected: pass.
+
+## Task 2: Add Thin Admin CLI
+
+**Files:**
+
+- Modify: `crates/catalog/Cargo.toml`
+- Create: `crates/catalog/src/bin/import-sde-latest.rs`
+
+- [ ] **Step 1: Add `tokio` dependency to `evetools-catalog`**
+
+The binary needs `#[tokio::main]`.
+
+- [ ] **Step 2: Create binary**
+
+The binary reads `EVETOOLS_DATABASE_URL`, connects with `CatalogService`, calls `import_latest()`, prints non-secret status data, and exits with code 1 on error.
+
+- [ ] **Step 3: Compile through tests**
+
+Run:
+
+```bash
+cargo test -p evetools-catalog
+```
+
+Expected: pass and compile the binary.
+
+## Task 3: Document Admin Import Command
+
+**Files:**
+
+- Modify: `README.md`
+
+- [ ] **Step 1: Add bootstrap command**
+
+Document the `cargo run -p evetools-catalog --bin import-sde-latest` command and clarify that `EVETOOLS_TEST_DATABASE_URL` must not point to the same database used for full catalog imports.
+
+- [ ] **Step 2: Verify docs and workspace**
+
+Run:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+pnpm --filter @evetools/desktop typecheck
+git diff --check
+```
+
+Expected: all pass.
