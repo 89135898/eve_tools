@@ -36,6 +36,8 @@ Initial thresholds are intentionally conservative and only distinguish full SDE 
 
 These thresholds should not be used as product metrics. They are only a defensive skip guard.
 
+`CatalogRepository::import_archive()` also has an idempotency guard. It may reuse an existing successful import only when build number, source URL, and all imported row counts exactly match the incoming archive. A same-build fixture must not block a later complete official import.
+
 ## Admin CLI
 
 Add a binary under the existing `evetools-catalog` package:

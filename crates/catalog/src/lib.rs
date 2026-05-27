@@ -1,13 +1,15 @@
-use evetools_db::{
-    connect_pool, migrate_catalog_schema, CatalogRepository, CatalogStatus, ImportCatalogInput,
-    InventoryTypeView,
-};
+use evetools_db::{connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput};
+pub use evetools_db::{CatalogStatus, InventoryTypeView};
 use evetools_sde::{read_catalog_archive_from_bytes, SdeClient};
 use std::fmt;
 use thiserror::Error;
 
 const OFFICIAL_SDE_ARCHIVE_URL: &str =
     "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
+const MIN_COMPLETE_OFFICIAL_TYPE_COUNT: i64 = 10_000;
+const MIN_COMPLETE_OFFICIAL_GROUP_COUNT: i64 = 500;
+const MIN_COMPLETE_OFFICIAL_CATEGORY_COUNT: i64 = 20;
+const MIN_COMPLETE_OFFICIAL_MARKET_GROUP_COUNT: i64 = 1_000;
 
 #[derive(Clone)]
 /// Catalog database connection configuration.
@@ -84,9 +86,7 @@ impl CatalogService {
         let client = SdeClient::official()?;
         let latest_metadata = client.latest_metadata().await?;
         let current_status = self.status().await?;
-        if current_status.status == "success"
-            && current_status.build_number == Some(latest_metadata.build_number)
-        {
+        if should_skip_latest_import(&current_status, latest_metadata.build_number) {
             return Ok(current_status);
         }
 
@@ -122,5 +122,56 @@ impl CatalogService {
             .repository
             .get_inventory_type(type_id, language)
             .await?)
+    }
+}
+
+fn should_skip_latest_import(status: &CatalogStatus, latest_build_number: i32) -> bool {
+    status.status == "success"
+        && status.build_number == Some(latest_build_number)
+        && status.source_url.as_deref() == Some(OFFICIAL_SDE_ARCHIVE_URL)
+        && status.type_count >= MIN_COMPLETE_OFFICIAL_TYPE_COUNT
+        && status.group_count >= MIN_COMPLETE_OFFICIAL_GROUP_COUNT
+        && status.category_count >= MIN_COMPLETE_OFFICIAL_CATEGORY_COUNT
+        && status.market_group_count >= MIN_COMPLETE_OFFICIAL_MARKET_GROUP_COUNT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_skip_rejects_fixture_sized_status_even_when_build_matches() {
+        let status = CatalogStatus {
+            status: "success".to_string(),
+            build_number: Some(3_351_823),
+            release_date: Some("2026-05-19T12:12:31Z".to_string()),
+            source_url: Some(OFFICIAL_SDE_ARCHIVE_URL.to_string()),
+            completed_at: Some("2026-05-27T00:00:00Z".to_string()),
+            error_summary: None,
+            type_count: 1,
+            group_count: 1,
+            category_count: 1,
+            market_group_count: 1,
+        };
+
+        assert!(!should_skip_latest_import(&status, 3_351_823));
+    }
+
+    #[test]
+    fn import_skip_accepts_complete_official_status_when_build_matches() {
+        let status = CatalogStatus {
+            status: "success".to_string(),
+            build_number: Some(3_351_823),
+            release_date: Some("2026-05-19T12:12:31Z".to_string()),
+            source_url: Some(OFFICIAL_SDE_ARCHIVE_URL.to_string()),
+            completed_at: Some("2026-05-27T00:00:00Z".to_string()),
+            error_summary: None,
+            type_count: 10_000,
+            group_count: 500,
+            category_count: 20,
+            market_group_count: 1_000,
+        };
+
+        assert!(should_skip_latest_import(&status, 3_351_823));
     }
 }

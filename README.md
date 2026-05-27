@@ -109,7 +109,16 @@ export EVETOOLS_TEST_DATABASE_URL="<dev-or-test-supabase-postgres-url-with-sslmo
 cargo test -p evetools-db --test catalog_repository -- --nocapture
 ```
 
-未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。Importer 拥有 `evetools_catalog` schema，并会在每次成功导入后替换 catalog rows，所以测试请使用开发用或可丢弃的 Supabase project。
+未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。Importer 拥有 `evetools_catalog` schema，并会在每次成功导入后替换 catalog rows，所以测试请使用开发用或可丢弃的 Supabase project。不要让 `EVETOOLS_TEST_DATABASE_URL` 指向保存完整 catalog 的同一个数据库，否则测试样例会把完整 SDE 数据替换成一行 fixture。
+
+需要手动初始化或修复完整官方 SDE catalog 时，使用 admin CLI：
+
+```bash
+export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
+cargo run -p evetools-catalog --bin import-sde-latest
+```
+
+这个 CLI 只是薄入口：读取 `EVETOOLS_DATABASE_URL`，调用 Rust `CatalogService::import_latest()`，并输出导入状态和行数。正式维护时可以把同一套 service 方法接到 hosted job、worker、GitHub Actions 或 Supabase 托管函数上；不要把特权数据库连接串分发给最终用户桌面端。
 
 不要提交真实数据库 URL 或密码。不要把它们放进已纳入版本控制的 `.env` 文件。如果凭据出现在聊天、日志、截图或源码控制中，请先在 Supabase 中轮换后再使用。
 

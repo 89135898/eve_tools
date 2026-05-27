@@ -10,3 +10,4 @@ evetools-db = { path = "../db" }
 evetools-sde = { path = "../sde" }
 sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

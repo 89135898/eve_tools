@@ -44,7 +44,32 @@ cargo test -p evetools-catalog
 
 Expected: pass.
 
-## Task 2: Add Thin Admin CLI
+## Task 2: Guard Repository Import Reuse
+
+**Files:**
+
+- Modify: `crates/db/src/catalog.rs`
+
+- [ ] **Step 1: Add repository idempotency tests**
+
+Add tests proving same-build imports are reused only when source URL and row counts match.
+
+- [ ] **Step 2: Implement repository guard**
+
+Update `CatalogRepository::import_archive()` so `latest_success_status_for_build()` returns early only when the previous successful import matches the incoming source URL and archive counts.
+
+- [ ] **Step 3: Run DB tests**
+
+Run:
+
+```bash
+cargo test -p evetools-db import_reuse
+cargo test -p evetools-db --test catalog_repository
+```
+
+Expected: pass. The integration test may skip if `EVETOOLS_TEST_DATABASE_URL` is not set.
+
+## Task 3: Add Thin Admin CLI
 
 **Files:**
 
@@ -69,7 +94,7 @@ cargo test -p evetools-catalog
 
 Expected: pass and compile the binary.
 
-## Task 3: Document Admin Import Command
+## Task 4: Document Admin Import Command
 
 **Files:**
 

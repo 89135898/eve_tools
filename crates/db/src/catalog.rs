@@ -89,8 +89,10 @@ impl CatalogRepository {
 
         if let Some(build_number) = input.archive.metadata.build_number {
             if let Some(status) = latest_success_status_for_build(&mut tx, build_number).await? {
-                tx.commit().await?;
-                return Ok(status);
+                if successful_import_matches_input(&status, &input) {
+                    tx.commit().await?;
+                    return Ok(status);
+                }
             }
         }
 
@@ -265,6 +267,16 @@ async fn latest_success_status_for_build(
         return Ok(None);
     }
     Ok(Some(catalog_status_from_record(row)))
+}
+
+fn successful_import_matches_input(status: &CatalogStatus, input: &ImportCatalogInput<'_>) -> bool {
+    status.status == "success"
+        && status.build_number == input.archive.metadata.build_number
+        && status.source_url.as_deref() == Some(input.source_url)
+        && status.type_count == input.archive.types.len() as i64
+        && status.group_count == input.archive.groups.len() as i64
+        && status.category_count == input.archive.categories.len() as i64
+        && status.market_group_count == input.archive.market_groups.len() as i64
 }
 
 const TYPE_SELECT_SQL: &str = "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
@@ -562,6 +574,35 @@ const DELETE_STALE_CATALOG_ROWS_STATEMENTS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use evetools_sde::SdeMetadata;
+
+    fn empty_archive(build_number: i32) -> CatalogArchive {
+        CatalogArchive {
+            metadata: SdeMetadata {
+                build_number: Some(build_number),
+                release_date: Some("2026-05-19T12:12:31Z".to_string()),
+            },
+            types: Vec::new(),
+            groups: Vec::new(),
+            categories: Vec::new(),
+            market_groups: Vec::new(),
+        }
+    }
+
+    fn successful_status(build_number: i32, source_url: &str) -> CatalogStatus {
+        CatalogStatus {
+            status: "success".to_string(),
+            build_number: Some(build_number),
+            release_date: Some("2026-05-19T12:12:31Z".to_string()),
+            source_url: Some(source_url.to_string()),
+            completed_at: Some("2026-05-27T00:00:00Z".to_string()),
+            error_summary: None,
+            type_count: 0,
+            group_count: 0,
+            category_count: 0,
+            market_group_count: 0,
+        }
+    }
 
     #[test]
     fn search_limit_rejects_non_positive_values_and_clamps_large_values() {
@@ -578,5 +619,42 @@ mod tests {
             search_pattern(r"  %_\Mineral  "),
             Some(r"%\%\_\\Mineral%".to_string())
         );
+    }
+
+    #[test]
+    fn import_reuse_rejects_same_build_when_source_differs() {
+        let archive = empty_archive(3_351_823);
+        let input = ImportCatalogInput {
+            archive: &archive,
+            source_url: "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip",
+        };
+        let status = successful_status(3_351_823, "test://sample");
+
+        assert!(!successful_import_matches_input(&status, &input));
+    }
+
+    #[test]
+    fn import_reuse_rejects_same_build_when_counts_differ() {
+        let archive = empty_archive(3_351_823);
+        let input = ImportCatalogInput {
+            archive: &archive,
+            source_url: "test://same-build",
+        };
+        let mut status = successful_status(3_351_823, "test://same-build");
+        status.type_count = 1;
+
+        assert!(!successful_import_matches_input(&status, &input));
+    }
+
+    #[test]
+    fn import_reuse_accepts_same_build_source_and_counts() {
+        let archive = empty_archive(3_351_823);
+        let input = ImportCatalogInput {
+            archive: &archive,
+            source_url: "test://same-build",
+        };
+        let status = successful_status(3_351_823, "test://same-build");
+
+        assert!(successful_import_matches_input(&status, &input));
     }
 }
