@@ -85,13 +85,33 @@ Authenticated character order monitoring remains fixture-backed until the SSO ph
 
 EveTools imports CCP's official SDE JSON Lines archive into Supabase Postgres through the Rust catalog service.
 
-Required environment variable:
+### Database Connection
+
+Set the catalog database URL in your local shell before starting the desktop app:
 
 ```bash
 export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
+pnpm dev
 ```
 
-Do not commit real database URLs or passwords. If a credential is pasted into chat, logs, or source control, rotate it in Supabase before use.
+Use a connection string from the Supabase Dashboard's `Connect` panel. See Supabase's [database connection guide](https://supabase.com/docs/guides/database/connecting-to-postgres/serverless-drivers) when choosing between direct connections and poolers. For catalog import work, prefer one of these connection modes:
+
+- Direct Postgres connection with SSL enabled. This is the preferred mode for local/admin imports because the importer runs migrations and long transactions.
+- Supavisor session pooler if your local network cannot reach the direct IPv6 endpoint.
+- Do not use the transaction pooler for this importer. The importer uses long transactions and `sqlx`; transaction pooling is intended for short-lived/serverless traffic and can conflict with prepared-statement behavior.
+
+The URL must include SSL. Use `?sslmode=require` when there are no query parameters, or append `&sslmode=require` if the URL already has query parameters. If you configure Supabase SSL enforcement and install the project CA certificate locally, `sslmode=verify-full` is stronger.
+
+For repository integration tests that should touch Postgres, set a separate test URL:
+
+```bash
+export EVETOOLS_TEST_DATABASE_URL="<dev-or-test-supabase-postgres-url-with-sslmode-require>"
+cargo test -p evetools-db --test catalog_repository -- --nocapture
+```
+
+When `EVETOOLS_TEST_DATABASE_URL` is not set, Postgres integration tests skip themselves. The importer owns the `evetools_catalog` schema and replaces catalog rows for each successful import, so use a development or disposable Supabase project for tests.
+
+Do not commit real database URLs or passwords. Do not store them in checked-in `.env` files. If a credential is pasted into chat, logs, screenshots, or source control, rotate it in Supabase before use.
 
 Direct Supabase Postgres mode is only for local, private, or admin catalog imports.
 `EVETOOLS_DATABASE_URL` is a privileged credential: do not bundle it into the Tauri app,
