@@ -52,18 +52,26 @@ pub struct ImportCatalogInput<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogImportTable {
     Categories,
+    CategoryLocalizations,
     Groups,
+    GroupLocalizations,
     MarketGroups,
+    MarketGroupLocalizations,
     Types,
+    TypeLocalizations,
 }
 
 impl CatalogImportTable {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Categories => "categories",
+            Self::CategoryLocalizations => "category localizations",
             Self::Groups => "groups",
+            Self::GroupLocalizations => "group localizations",
             Self::MarketGroups => "market groups",
+            Self::MarketGroupLocalizations => "market group localizations",
             Self::Types => "types",
+            Self::TypeLocalizations => "type localizations",
         }
     }
 }
@@ -109,6 +117,37 @@ impl CatalogRepository {
             .unwrap_or_else(not_imported_status))
     }
 
+    pub async fn has_catalog_localizations(&self) -> Result<bool, CatalogDbError> {
+        let has_localizations: bool = sqlx::query_scalar(
+            "SELECT
+                EXISTS (
+                SELECT 1
+                FROM evetools_catalog.inventory_type_localizations
+                LIMIT 1
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM evetools_catalog.inventory_group_localizations
+                    LIMIT 1
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM evetools_catalog.inventory_category_localizations
+                    LIMIT 1
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM evetools_catalog.market_group_localizations
+                    LIMIT 1
+                )",
+        )
+        .persistent(false)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(has_localizations)
+    }
+
     pub async fn import_archive(
         &self,
         input: ImportCatalogInput<'_>,
@@ -133,10 +172,15 @@ impl CatalogRepository {
             .await?;
 
         if let Some(build_number) = input.archive.metadata.build_number {
-            if let Some(status) = latest_success_status_for_build(&mut tx, build_number).await? {
-                if successful_import_matches_input(&status, &input) {
+            if let Some(successful_import) =
+                latest_success_status_for_build(&mut tx, build_number).await?
+            {
+                if successful_import_matches_input(&successful_import.status, &input)
+                    && localization_counts_match_input(&mut tx, successful_import.import_id, &input)
+                        .await?
+                {
                     tx.commit().await?;
-                    return Ok(status);
+                    return Ok(successful_import.status);
                 }
             }
         }
@@ -155,9 +199,13 @@ impl CatalogRepository {
         .await?;
 
         insert_categories(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_category_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
         insert_groups(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_group_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
         insert_market_groups(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_market_group_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
         insert_types(&mut tx, import_id, input.archive, &mut progress).await?;
+        insert_type_localizations(&mut tx, import_id, input.archive, &mut progress).await?;
         progress(CatalogImportProgress::DeletingStaleRows);
         delete_stale_catalog_rows(&mut tx, import_id).await?;
 
@@ -186,9 +234,11 @@ impl CatalogRepository {
         type_id: i32,
         language: &str,
     ) -> Result<Option<InventoryTypeView>, CatalogDbError> {
+        let language_fallbacks = language_fallbacks(language);
         let row = sqlx::query_as::<_, InventoryTypeRow>(TYPE_SELECT_SQL)
             .persistent(false)
             .bind(type_id)
+            .bind(language_fallbacks)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|row| row.into_view(language)))
@@ -206,23 +256,61 @@ impl CatalogRepository {
         let Some(pattern) = search_pattern(query) else {
             return Ok(Vec::new());
         };
+        let language_fallbacks = language_fallbacks(language);
         let rows = sqlx::query_as::<_, InventoryTypeRow>(
             "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
+                    COALESCE(
+                        (SELECT l.name
+                         FROM evetools_catalog.inventory_type_localizations l
+                         WHERE l.type_id = t.type_id AND l.name IS NOT NULL
+                         ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+                         LIMIT 1),
+                        t.name_en, t.name_zh
+                    ) AS display_name,
                     t.name_en, t.name_zh, g.name_en AS group_name_en, g.name_zh AS group_name_zh,
                     c.name_en AS category_name_en, c.name_zh AS category_name_zh,
                     mg.name_en AS market_group_name_en, mg.name_zh AS market_group_name_zh,
+                    COALESCE(
+                        (SELECT l.name
+                         FROM evetools_catalog.inventory_group_localizations l
+                         WHERE l.group_id = g.group_id AND l.name IS NOT NULL
+                         ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+                         LIMIT 1),
+                        g.name_en, g.name_zh
+                    ) AS group_display_name,
+                    COALESCE(
+                        (SELECT l.name
+                         FROM evetools_catalog.inventory_category_localizations l
+                         WHERE l.category_id = c.category_id AND l.name IS NOT NULL
+                         ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+                         LIMIT 1),
+                        c.name_en, c.name_zh
+                    ) AS category_display_name,
+                    COALESCE(
+                        (SELECT l.name
+                         FROM evetools_catalog.market_group_localizations l
+                         WHERE l.market_group_id = mg.market_group_id AND l.name IS NOT NULL
+                         ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+                         LIMIT 1),
+                        mg.name_en, mg.name_zh
+                    ) AS market_group_display_name,
                     t.published,
                     (t.published AND t.market_group_id IS NOT NULL AND (t.name_en IS NOT NULL OR t.name_zh IS NOT NULL)) AS market_eligible
              FROM evetools_catalog.inventory_types t
              LEFT JOIN evetools_catalog.inventory_groups g ON g.group_id = t.group_id
              LEFT JOIN evetools_catalog.inventory_categories c ON c.category_id = g.category_id
              LEFT JOIN evetools_catalog.market_groups mg ON mg.market_group_id = t.market_group_id
-             WHERE t.name_en ILIKE $1 ESCAPE '\\' OR t.name_zh ILIKE $1 ESCAPE '\\'
-             ORDER BY t.name_en NULLS LAST
-             LIMIT $2",
+             WHERE EXISTS (
+                SELECT 1
+                FROM evetools_catalog.inventory_type_localizations search_l
+                WHERE search_l.type_id = t.type_id AND search_l.name ILIKE $1 ESCAPE '\\'
+             ) OR t.name_en ILIKE $1 ESCAPE '\\' OR t.name_zh ILIKE $1 ESCAPE '\\'
+             ORDER BY display_name NULLS LAST
+             LIMIT $3",
         )
         .persistent(false)
         .bind(pattern)
+        .bind(language_fallbacks)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -261,6 +349,19 @@ type CatalogStatusRecord = (
     i64,
 );
 
+struct SuccessfulImportStatus {
+    import_id: i64,
+    status: CatalogStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CatalogLocalizationCounts {
+    type_count: i64,
+    group_count: i64,
+    category_count: i64,
+    market_group_count: i64,
+}
+
 fn catalog_status_from_record(row: CatalogStatusRecord) -> CatalogStatus {
     CatalogStatus {
         status: row.0,
@@ -294,9 +395,9 @@ fn not_imported_status() -> CatalogStatus {
 async fn latest_success_status_for_build(
     tx: &mut Transaction<'_, Postgres>,
     build_number: i32,
-) -> Result<Option<CatalogStatus>, sqlx::Error> {
-    let row = sqlx::query_as::<_, CatalogStatusRecord>(
-        "SELECT status, build_number, release_date, source_url, completed_at, error_summary,
+) -> Result<Option<SuccessfulImportStatus>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (i64, String, Option<i32>, Option<String>, Option<String>, Option<chrono::DateTime<Utc>>, Option<String>, i64, i64, i64, i64)>(
+        "SELECT import_id, status, build_number, release_date, source_url, completed_at, error_summary,
                 type_count, group_count, category_count, market_group_count
          FROM evetools_catalog.sde_imports
          ORDER BY import_id DESC
@@ -309,10 +410,14 @@ async fn latest_success_status_for_build(
     let Some(row) = row else {
         return Ok(None);
     };
-    if row.0 != "success" || row.1 != Some(build_number) {
+    if row.1 != "success" || row.2 != Some(build_number) {
         return Ok(None);
     }
-    Ok(Some(catalog_status_from_record(row)))
+    let import_id = row.0;
+    let status = catalog_status_from_record((
+        row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+    ));
+    Ok(Some(SuccessfulImportStatus { import_id, status }))
 }
 
 fn successful_import_matches_input(status: &CatalogStatus, input: &ImportCatalogInput<'_>) -> bool {
@@ -325,10 +430,100 @@ fn successful_import_matches_input(status: &CatalogStatus, input: &ImportCatalog
         && status.market_group_count == input.archive.market_groups.len() as i64
 }
 
+fn expected_localization_counts(archive: &CatalogArchive) -> CatalogLocalizationCounts {
+    CatalogLocalizationCounts {
+        type_count: archive
+            .types
+            .iter()
+            .map(|row| row.localizations.len() as i64)
+            .sum(),
+        group_count: archive
+            .groups
+            .iter()
+            .map(|row| row.localizations.len() as i64)
+            .sum(),
+        category_count: archive
+            .categories
+            .iter()
+            .map(|row| row.localizations.len() as i64)
+            .sum(),
+        market_group_count: archive
+            .market_groups
+            .iter()
+            .map(|row| row.localizations.len() as i64)
+            .sum(),
+    }
+}
+
+async fn localization_counts_for_import(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+) -> Result<CatalogLocalizationCounts, sqlx::Error> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT
+            (SELECT COUNT(*) FROM evetools_catalog.inventory_type_localizations WHERE updated_import_id = $1),
+            (SELECT COUNT(*) FROM evetools_catalog.inventory_group_localizations WHERE updated_import_id = $1),
+            (SELECT COUNT(*) FROM evetools_catalog.inventory_category_localizations WHERE updated_import_id = $1),
+            (SELECT COUNT(*) FROM evetools_catalog.market_group_localizations WHERE updated_import_id = $1)",
+    )
+    .persistent(false)
+    .bind(import_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(CatalogLocalizationCounts {
+        type_count: row.0,
+        group_count: row.1,
+        category_count: row.2,
+        market_group_count: row.3,
+    })
+}
+
+async fn localization_counts_match_input(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+    input: &ImportCatalogInput<'_>,
+) -> Result<bool, sqlx::Error> {
+    let actual = localization_counts_for_import(tx, import_id).await?;
+    Ok(actual == expected_localization_counts(input.archive))
+}
+
 const TYPE_SELECT_SQL: &str = "SELECT t.type_id, t.group_id, g.category_id, t.market_group_id,
+        COALESCE(
+            (SELECT l.name
+             FROM evetools_catalog.inventory_type_localizations l
+             WHERE l.type_id = t.type_id AND l.name IS NOT NULL
+             ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+             LIMIT 1),
+            t.name_en, t.name_zh
+        ) AS display_name,
         t.name_en, t.name_zh, g.name_en AS group_name_en, g.name_zh AS group_name_zh,
         c.name_en AS category_name_en, c.name_zh AS category_name_zh,
         mg.name_en AS market_group_name_en, mg.name_zh AS market_group_name_zh,
+        COALESCE(
+            (SELECT l.name
+             FROM evetools_catalog.inventory_group_localizations l
+             WHERE l.group_id = g.group_id AND l.name IS NOT NULL
+             ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+             LIMIT 1),
+            g.name_en, g.name_zh
+        ) AS group_display_name,
+        COALESCE(
+            (SELECT l.name
+             FROM evetools_catalog.inventory_category_localizations l
+             WHERE l.category_id = c.category_id AND l.name IS NOT NULL
+             ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+             LIMIT 1),
+            c.name_en, c.name_zh
+        ) AS category_display_name,
+        COALESCE(
+            (SELECT l.name
+             FROM evetools_catalog.market_group_localizations l
+             WHERE l.market_group_id = mg.market_group_id AND l.name IS NOT NULL
+             ORDER BY COALESCE(array_position($2::text[], l.language), 2147483647), l.language
+             LIMIT 1),
+            mg.name_en, mg.name_zh
+        ) AS market_group_display_name,
         t.published,
         (t.published AND t.market_group_id IS NOT NULL AND (t.name_en IS NOT NULL OR t.name_zh IS NOT NULL)) AS market_eligible
     FROM evetools_catalog.inventory_types t
@@ -342,6 +537,7 @@ struct InventoryTypeRow {
     group_id: i32,
     category_id: Option<i32>,
     market_group_id: Option<i32>,
+    display_name: Option<String>,
     name_en: Option<String>,
     name_zh: Option<String>,
     group_name_en: Option<String>,
@@ -350,6 +546,9 @@ struct InventoryTypeRow {
     category_name_zh: Option<String>,
     market_group_name_en: Option<String>,
     market_group_name_zh: Option<String>,
+    group_display_name: Option<String>,
+    category_display_name: Option<String>,
+    market_group_display_name: Option<String>,
     published: bool,
     market_eligible: bool,
 }
@@ -361,6 +560,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for InventoryTypeRow {
             group_id: row.try_get("group_id")?,
             category_id: row.try_get("category_id")?,
             market_group_id: row.try_get("market_group_id")?,
+            display_name: row.try_get("display_name")?,
             name_en: row.try_get("name_en")?,
             name_zh: row.try_get("name_zh")?,
             group_name_en: row.try_get("group_name_en")?,
@@ -369,6 +569,9 @@ impl<'r> sqlx::FromRow<'r, PgRow> for InventoryTypeRow {
             category_name_zh: row.try_get("category_name_zh")?,
             market_group_name_en: row.try_get("market_group_name_en")?,
             market_group_name_zh: row.try_get("market_group_name_zh")?,
+            group_display_name: row.try_get("group_display_name")?,
+            category_display_name: row.try_get("category_display_name")?,
+            market_group_display_name: row.try_get("market_group_display_name")?,
             published: row.try_get("published")?,
             market_eligible: row.try_get("market_eligible")?,
         })
@@ -378,7 +581,10 @@ impl<'r> sqlx::FromRow<'r, PgRow> for InventoryTypeRow {
 impl InventoryTypeRow {
     fn into_view(self, language: &str) -> InventoryTypeView {
         let prefer_zh = language.starts_with("zh");
-        let display_name = choose_name(prefer_zh, self.name_zh.as_ref(), self.name_en.as_ref())
+        let display_name = self
+            .display_name
+            .clone()
+            .or_else(|| choose_name(prefer_zh, self.name_zh.as_ref(), self.name_en.as_ref()))
             .unwrap_or_else(|| format!("Type {}", self.type_id));
         InventoryTypeView {
             type_id: self.type_id,
@@ -388,21 +594,27 @@ impl InventoryTypeRow {
             display_name,
             name_en: self.name_en,
             name_zh: self.name_zh,
-            group_name: choose_name(
-                prefer_zh,
-                self.group_name_zh.as_ref(),
-                self.group_name_en.as_ref(),
-            ),
-            category_name: choose_name(
-                prefer_zh,
-                self.category_name_zh.as_ref(),
-                self.category_name_en.as_ref(),
-            ),
-            market_group_name: choose_name(
-                prefer_zh,
-                self.market_group_name_zh.as_ref(),
-                self.market_group_name_en.as_ref(),
-            ),
+            group_name: self.group_display_name.or_else(|| {
+                choose_name(
+                    prefer_zh,
+                    self.group_name_zh.as_ref(),
+                    self.group_name_en.as_ref(),
+                )
+            }),
+            category_name: self.category_display_name.or_else(|| {
+                choose_name(
+                    prefer_zh,
+                    self.category_name_zh.as_ref(),
+                    self.category_name_en.as_ref(),
+                )
+            }),
+            market_group_name: self.market_group_display_name.or_else(|| {
+                choose_name(
+                    prefer_zh,
+                    self.market_group_name_zh.as_ref(),
+                    self.market_group_name_en.as_ref(),
+                )
+            }),
             published: self.published,
             market_eligible: self.market_eligible,
         }
@@ -441,6 +653,30 @@ fn search_pattern(query: &str) -> Option<String> {
     }
     pattern.push('%');
     Some(pattern)
+}
+
+fn language_fallbacks(language: &str) -> Vec<String> {
+    let normalized = language.trim().replace('_', "-");
+    let mut fallbacks = Vec::new();
+    push_unique_language(&mut fallbacks, normalized.as_str());
+
+    if let Some((base, _)) = normalized.split_once('-') {
+        push_unique_language(&mut fallbacks, base);
+    }
+    if normalized.starts_with("zh") {
+        push_unique_language(&mut fallbacks, "zh");
+    }
+    push_unique_language(&mut fallbacks, "en");
+    fallbacks
+}
+
+fn push_unique_language(fallbacks: &mut Vec<String>, language: &str) {
+    if language.is_empty() {
+        return;
+    }
+    if !fallbacks.iter().any(|value| value == language) {
+        fallbacks.push(language.to_string());
+    }
 }
 
 fn should_report_table_progress(completed: usize, total: usize) -> bool {
@@ -506,6 +742,44 @@ async fn insert_categories(
     Ok(())
 }
 
+async fn insert_category_localizations(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+    archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
+) -> Result<(), sqlx::Error> {
+    let table = CatalogImportTable::CategoryLocalizations;
+    let total = archive
+        .categories
+        .iter()
+        .map(|row| row.localizations.len())
+        .sum();
+    report_table_started(progress, table, total);
+    let mut completed = 0;
+    for row in &archive.categories {
+        for localization in &row.localizations {
+            sqlx::query(
+                "INSERT INTO evetools_catalog.inventory_category_localizations
+                    (category_id, language, name, updated_import_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (category_id, language) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    updated_import_id = EXCLUDED.updated_import_id",
+            )
+            .persistent(false)
+            .bind(row.category_id)
+            .bind(localization.language.as_str())
+            .bind(localization.name.as_deref())
+            .bind(import_id)
+            .execute(&mut **tx)
+            .await?;
+            completed += 1;
+            report_table_progress(progress, table, completed, total);
+        }
+    }
+    Ok(())
+}
+
 async fn insert_groups(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
@@ -539,6 +813,44 @@ async fn insert_groups(
         .execute(&mut **tx)
         .await?;
         report_table_progress(progress, table, index + 1, total);
+    }
+    Ok(())
+}
+
+async fn insert_group_localizations(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+    archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
+) -> Result<(), sqlx::Error> {
+    let table = CatalogImportTable::GroupLocalizations;
+    let total = archive
+        .groups
+        .iter()
+        .map(|row| row.localizations.len())
+        .sum();
+    report_table_started(progress, table, total);
+    let mut completed = 0;
+    for row in &archive.groups {
+        for localization in &row.localizations {
+            sqlx::query(
+                "INSERT INTO evetools_catalog.inventory_group_localizations
+                    (group_id, language, name, updated_import_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (group_id, language) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    updated_import_id = EXCLUDED.updated_import_id",
+            )
+            .persistent(false)
+            .bind(row.group_id)
+            .bind(localization.language.as_str())
+            .bind(localization.name.as_deref())
+            .bind(import_id)
+            .execute(&mut **tx)
+            .await?;
+            completed += 1;
+            report_table_progress(progress, table, completed, total);
+        }
     }
     Ok(())
 }
@@ -581,6 +893,46 @@ async fn insert_market_groups(
         .execute(&mut **tx)
         .await?;
         report_table_progress(progress, table, index + 1, total);
+    }
+    Ok(())
+}
+
+async fn insert_market_group_localizations(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+    archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
+) -> Result<(), sqlx::Error> {
+    let table = CatalogImportTable::MarketGroupLocalizations;
+    let total = archive
+        .market_groups
+        .iter()
+        .map(|row| row.localizations.len())
+        .sum();
+    report_table_started(progress, table, total);
+    let mut completed = 0;
+    for row in &archive.market_groups {
+        for localization in &row.localizations {
+            sqlx::query(
+                "INSERT INTO evetools_catalog.market_group_localizations
+                    (market_group_id, language, name, description, updated_import_id)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (market_group_id, language) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    updated_import_id = EXCLUDED.updated_import_id",
+            )
+            .persistent(false)
+            .bind(row.market_group_id)
+            .bind(localization.language.as_str())
+            .bind(localization.name.as_deref())
+            .bind(localization.description.as_deref())
+            .bind(import_id)
+            .execute(&mut **tx)
+            .await?;
+            completed += 1;
+            report_table_progress(progress, table, completed, total);
+        }
     }
     Ok(())
 }
@@ -644,6 +996,46 @@ async fn insert_types(
     Ok(())
 }
 
+async fn insert_type_localizations(
+    tx: &mut Transaction<'_, Postgres>,
+    import_id: i64,
+    archive: &CatalogArchive,
+    progress: &mut impl FnMut(CatalogImportProgress),
+) -> Result<(), sqlx::Error> {
+    let table = CatalogImportTable::TypeLocalizations;
+    let total = archive
+        .types
+        .iter()
+        .map(|row| row.localizations.len())
+        .sum();
+    report_table_started(progress, table, total);
+    let mut completed = 0;
+    for row in &archive.types {
+        for localization in &row.localizations {
+            sqlx::query(
+                "INSERT INTO evetools_catalog.inventory_type_localizations
+                    (type_id, language, name, description, updated_import_id)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (type_id, language) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    updated_import_id = EXCLUDED.updated_import_id",
+            )
+            .persistent(false)
+            .bind(row.type_id)
+            .bind(localization.language.as_str())
+            .bind(localization.name.as_deref())
+            .bind(localization.description.as_deref())
+            .bind(import_id)
+            .execute(&mut **tx)
+            .await?;
+            completed += 1;
+            report_table_progress(progress, table, completed, total);
+        }
+    }
+    Ok(())
+}
+
 async fn delete_stale_catalog_rows(
     tx: &mut Transaction<'_, Postgres>,
     import_id: i64,
@@ -659,6 +1051,10 @@ async fn delete_stale_catalog_rows(
 }
 
 const DELETE_STALE_CATALOG_ROWS_STATEMENTS: &[&str] = &[
+    "DELETE FROM evetools_catalog.inventory_type_localizations WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.market_group_localizations WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.inventory_group_localizations WHERE updated_import_id <> $1",
+    "DELETE FROM evetools_catalog.inventory_category_localizations WHERE updated_import_id <> $1",
     "DELETE FROM evetools_catalog.inventory_types WHERE updated_import_id <> $1",
     "DELETE FROM evetools_catalog.market_groups WHERE updated_import_id <> $1",
     "DELETE FROM evetools_catalog.inventory_groups WHERE updated_import_id <> $1",
@@ -759,5 +1155,58 @@ mod tests {
         assert!(!should_report_table_progress(1_001, 2_500));
         assert!(should_report_table_progress(2_000, 2_500));
         assert!(should_report_table_progress(2_500, 2_500));
+    }
+
+    #[test]
+    fn expected_localization_counts_include_all_entity_tables() {
+        let mut archive = empty_archive(3_351_823);
+        archive.types.push(evetools_sde::CatalogType {
+            type_id: 34,
+            group_id: 18,
+            market_group_id: None,
+            published: true,
+            volume: None,
+            packaged_volume: None,
+            capacity: None,
+            mass: None,
+            portion_size: None,
+            meta_level: None,
+            name_en: Some("Tritanium".to_string()),
+            name_zh: None,
+            description_en: None,
+            description_zh: None,
+            raw_name_json: serde_json::json!({"en":"Tritanium","ja":"トリタニウム"}),
+            raw_description_json: None,
+            localizations: vec![
+                evetools_sde::CatalogLocalization {
+                    language: "en".to_string(),
+                    name: Some("Tritanium".to_string()),
+                    description: None,
+                },
+                evetools_sde::CatalogLocalization {
+                    language: "ja".to_string(),
+                    name: Some("トリタニウム".to_string()),
+                    description: None,
+                },
+            ],
+        });
+
+        assert_eq!(
+            expected_localization_counts(&archive),
+            CatalogLocalizationCounts {
+                type_count: 2,
+                group_count: 0,
+                category_count: 0,
+                market_group_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn language_fallbacks_prefer_exact_base_chinese_and_english() {
+        assert_eq!(language_fallbacks("zh-Hans"), vec!["zh-Hans", "zh", "en"]);
+        assert_eq!(language_fallbacks("en-US"), vec!["en-US", "en"]);
+        assert_eq!(language_fallbacks(""), vec!["en"]);
+        assert_eq!(language_fallbacks(" zh_CN "), vec!["zh-CN", "zh", "en"]);
     }
 }

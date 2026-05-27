@@ -1,6 +1,7 @@
 use evetools_db::{connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput};
 use evetools_sde::{
-    CatalogArchive, CatalogCategory, CatalogGroup, CatalogMarketGroup, CatalogType, SdeMetadata,
+    CatalogArchive, CatalogCategory, CatalogGroup, CatalogLocalization, CatalogMarketGroup,
+    CatalogType, SdeMetadata,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -32,6 +33,23 @@ fn sample_archive() -> CatalogArchive {
             description_zh: None,
             raw_name_json: serde_json::json!({"en":"Tritanium","zh":"三钛合金"}),
             raw_description_json: None,
+            localizations: vec![
+                CatalogLocalization {
+                    language: "en".to_string(),
+                    name: Some("Tritanium".to_string()),
+                    description: None,
+                },
+                CatalogLocalization {
+                    language: "ja".to_string(),
+                    name: Some("トリタニウム".to_string()),
+                    description: None,
+                },
+                CatalogLocalization {
+                    language: "zh".to_string(),
+                    name: Some("三钛合金".to_string()),
+                    description: None,
+                },
+            ],
         }],
         groups: vec![CatalogGroup {
             group_id: 18,
@@ -40,6 +58,18 @@ fn sample_archive() -> CatalogArchive {
             name_en: Some("Mineral".to_string()),
             name_zh: Some("矿物".to_string()),
             raw_name_json: serde_json::json!({"en":"Mineral","zh":"矿物"}),
+            localizations: vec![
+                CatalogLocalization {
+                    language: "en".to_string(),
+                    name: Some("Mineral".to_string()),
+                    description: None,
+                },
+                CatalogLocalization {
+                    language: "zh".to_string(),
+                    name: Some("矿物".to_string()),
+                    description: None,
+                },
+            ],
         }],
         categories: vec![CatalogCategory {
             category_id: 4,
@@ -47,6 +77,18 @@ fn sample_archive() -> CatalogArchive {
             name_en: Some("Material".to_string()),
             name_zh: Some("材料".to_string()),
             raw_name_json: serde_json::json!({"en":"Material","zh":"材料"}),
+            localizations: vec![
+                CatalogLocalization {
+                    language: "en".to_string(),
+                    name: Some("Material".to_string()),
+                    description: None,
+                },
+                CatalogLocalization {
+                    language: "zh".to_string(),
+                    name: Some("材料".to_string()),
+                    description: None,
+                },
+            ],
         }],
         market_groups: vec![CatalogMarketGroup {
             market_group_id: 1857,
@@ -57,6 +99,18 @@ fn sample_archive() -> CatalogArchive {
             description_zh: None,
             raw_name_json: serde_json::json!({"en":"Minerals","zh":"矿物"}),
             raw_description_json: None,
+            localizations: vec![
+                CatalogLocalization {
+                    language: "en".to_string(),
+                    name: Some("Minerals".to_string()),
+                    description: None,
+                },
+                CatalogLocalization {
+                    language: "zh".to_string(),
+                    name: Some("矿物".to_string()),
+                    description: None,
+                },
+            ],
         }],
     }
 }
@@ -120,6 +174,19 @@ async fn imports_and_searches_catalog_rows() {
     assert!(zero_limit_search.is_empty());
     assert!(negative_limit_search.is_empty());
     assert!(wildcard_search.is_empty());
+
+    let ja = repository
+        .get_inventory_type(34, "ja")
+        .await
+        .unwrap()
+        .unwrap();
+    let ja_search = repository
+        .search_inventory_types("トリ", "ja", 10)
+        .await
+        .unwrap();
+
+    assert_eq!(ja.display_name, "トリタニウム");
+    assert_eq!(ja_search[0].display_name, "トリタニウム");
 
     let replacement_status = repository
         .import_archive(ImportCatalogInput {

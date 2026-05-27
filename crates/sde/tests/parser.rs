@@ -37,7 +37,7 @@ fn test_zip() -> Vec<u8> {
 #[test]
 fn parses_type_line_with_localized_names() {
     let row: CatalogType = parse_type_line(
-        r#"{"_key":34,"description":{"en":"Primary building block","zh":"主要建造材料"},"groupID":18,"marketGroupID":1857,"name":{"en":"Tritanium","zh":"三钛合金"},"published":true,"volume":0.01}"#,
+        r#"{"_key":34,"description":{"en":"Primary building block","ja":"主要な建材","zh":"主要建造材料"},"groupID":18,"marketGroupID":1857,"name":{"en":"Tritanium","ja":"トリタニウム","zh":"三钛合金"},"published":true,"volume":0.01}"#,
     )
     .unwrap();
 
@@ -46,6 +46,13 @@ fn parses_type_line_with_localized_names() {
     assert_eq!(row.market_group_id, Some(1857));
     assert_eq!(row.name_en.as_deref(), Some("Tritanium"));
     assert_eq!(row.name_zh.as_deref(), Some("三钛合金"));
+    assert_eq!(row.localizations.len(), 3);
+    assert_eq!(row.localizations[1].language, "ja");
+    assert_eq!(row.localizations[1].name.as_deref(), Some("トリタニウム"));
+    assert_eq!(
+        row.localizations[1].description.as_deref(),
+        Some("主要な建材")
+    );
 }
 
 #[test]

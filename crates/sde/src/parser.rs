@@ -1,5 +1,6 @@
 use crate::models::*;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -32,8 +33,41 @@ fn optional_raw_json(map: &LocalizedMap) -> Option<serde_json::Value> {
     }
 }
 
+fn localized_entry(map: &LocalizedMap, key: &str) -> Option<String> {
+    map.get(key).filter(|value| !value.is_empty()).cloned()
+}
+
+fn localizations(
+    names: &LocalizedMap,
+    descriptions: Option<&LocalizedMap>,
+) -> Vec<CatalogLocalization> {
+    let mut languages = BTreeSet::new();
+    for (language, value) in names {
+        if !value.is_empty() {
+            languages.insert(language.clone());
+        }
+    }
+    if let Some(descriptions) = descriptions {
+        for (language, value) in descriptions {
+            if !value.is_empty() {
+                languages.insert(language.clone());
+            }
+        }
+    }
+
+    languages
+        .into_iter()
+        .map(|language| CatalogLocalization {
+            name: localized_entry(names, &language),
+            description: descriptions.and_then(|values| localized_entry(values, &language)),
+            language,
+        })
+        .collect()
+}
+
 pub fn parse_type_line(line: &str) -> Result<CatalogType, SdeParseError> {
     let raw: RawTypeRow = parse_row("types", line)?;
+    let localizations = localizations(&raw.name, Some(&raw.description));
     Ok(CatalogType {
         type_id: raw.key,
         group_id: raw.group_id,
@@ -51,11 +85,13 @@ pub fn parse_type_line(line: &str) -> Result<CatalogType, SdeParseError> {
         description_zh: localized(&raw.description, "zh"),
         raw_name_json: raw_json(&raw.name),
         raw_description_json: optional_raw_json(&raw.description),
+        localizations,
     })
 }
 
 pub fn parse_group_line(line: &str) -> Result<CatalogGroup, SdeParseError> {
     let raw: RawGroupRow = parse_row("groups", line)?;
+    let localizations = localizations(&raw.name, None);
     Ok(CatalogGroup {
         group_id: raw.key,
         category_id: raw.category_id,
@@ -63,22 +99,26 @@ pub fn parse_group_line(line: &str) -> Result<CatalogGroup, SdeParseError> {
         name_en: localized(&raw.name, "en"),
         name_zh: localized(&raw.name, "zh"),
         raw_name_json: raw_json(&raw.name),
+        localizations,
     })
 }
 
 pub fn parse_category_line(line: &str) -> Result<CatalogCategory, SdeParseError> {
     let raw: RawCategoryRow = parse_row("categories", line)?;
+    let localizations = localizations(&raw.name, None);
     Ok(CatalogCategory {
         category_id: raw.key,
         published: raw.published,
         name_en: localized(&raw.name, "en"),
         name_zh: localized(&raw.name, "zh"),
         raw_name_json: raw_json(&raw.name),
+        localizations,
     })
 }
 
 pub fn parse_market_group_line(line: &str) -> Result<CatalogMarketGroup, SdeParseError> {
     let raw: RawMarketGroupRow = parse_row("marketGroups", line)?;
+    let localizations = localizations(&raw.name, Some(&raw.description));
     Ok(CatalogMarketGroup {
         market_group_id: raw.key,
         parent_group_id: raw.parent_group_id,
@@ -88,6 +128,7 @@ pub fn parse_market_group_line(line: &str) -> Result<CatalogMarketGroup, SdePars
         description_zh: localized(&raw.description, "zh"),
         raw_name_json: raw_json(&raw.name),
         raw_description_json: optional_raw_json(&raw.description),
+        localizations,
     })
 }
 

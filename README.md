@@ -122,6 +122,8 @@ cargo run -p evetools-catalog --bin import-sde-latest
 
 CLI 会显示阶段级进度：检查 SDE metadata、检查当前 catalog、下载完成大小、解析后的行数、写入 Postgres 的分表行数，以及最终状态。下载阶段第一版不显示百分比；写库阶段每 1000 行和每张表最后一行报告一次。
 
+SDE 实体名和描述会导入到标准化 localization 表中。`get_inventory_type` 和 `search_inventory_types` 在服务端根据请求语言选择显示名，前端只传当前语言，不解析 SDE 多语言 JSON。语言 fallback 顺序为精确语言、基础语言、中文 fallback、英文 fallback，再退回任意可用名称。升级到包含 localization 表的版本后，需要重新运行一次完整 SDE 导入来填充这些表。
+
 不要提交真实数据库 URL 或密码。不要把它们放进已纳入版本控制的 `.env` 文件。如果凭据出现在聊天、日志、截图或源码控制中，请先在 Supabase 中轮换后再使用。
 
 Direct Supabase Postgres 模式只适用于本地、私有或 admin catalog 导入。`EVETOOLS_DATABASE_URL` 是特权凭据：不要把它打包进 Tauri app，不要注入给最终用户，也不要要求最终用户持有它。正式分发前，必须把直接数据库访问替换为 hosted API、Supabase Edge Function，或严格由 RLS 约束的只读路径。

@@ -141,7 +141,12 @@ impl CatalogService {
             latest_build_number: latest_metadata.build_number,
         });
         let current_status = self.status().await?;
-        if should_skip_latest_import(&current_status, latest_metadata.build_number) {
+        let has_localizations = self.repository.has_catalog_localizations().await?;
+        if should_skip_latest_import(
+            &current_status,
+            latest_metadata.build_number,
+            has_localizations,
+        ) {
             progress(CatalogImportProgress::AlreadyCurrent {
                 build_number: latest_metadata.build_number,
             });
@@ -224,8 +229,13 @@ impl CatalogService {
     }
 }
 
-fn should_skip_latest_import(status: &CatalogStatus, latest_build_number: i32) -> bool {
+fn should_skip_latest_import(
+    status: &CatalogStatus,
+    latest_build_number: i32,
+    has_localizations: bool,
+) -> bool {
     status.status == "success"
+        && has_localizations
         && status.build_number == Some(latest_build_number)
         && status.source_url.as_deref() == Some(OFFICIAL_SDE_ARCHIVE_URL)
         && status.type_count >= MIN_COMPLETE_OFFICIAL_TYPE_COUNT
@@ -253,7 +263,7 @@ mod tests {
             market_group_count: 1,
         };
 
-        assert!(!should_skip_latest_import(&status, 3_351_823));
+        assert!(!should_skip_latest_import(&status, 3_351_823, true));
     }
 
     #[test]
@@ -271,6 +281,24 @@ mod tests {
             market_group_count: 1_000,
         };
 
-        assert!(should_skip_latest_import(&status, 3_351_823));
+        assert!(should_skip_latest_import(&status, 3_351_823, true));
+    }
+
+    #[test]
+    fn import_skip_rejects_complete_status_without_localization_rows() {
+        let status = CatalogStatus {
+            status: "success".to_string(),
+            build_number: Some(3_351_823),
+            release_date: Some("2026-05-19T12:12:31Z".to_string()),
+            source_url: Some(OFFICIAL_SDE_ARCHIVE_URL.to_string()),
+            completed_at: Some("2026-05-27T00:00:00Z".to_string()),
+            error_summary: None,
+            type_count: 10_000,
+            group_count: 500,
+            category_count: 20,
+            market_group_count: 1_000,
+        };
+
+        assert!(!should_skip_latest_import(&status, 3_351_823, false));
     }
 }

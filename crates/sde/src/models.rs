@@ -1,6 +1,13 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogLocalization {
+    pub language: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogType {
     pub type_id: i32,
@@ -19,6 +26,7 @@ pub struct CatalogType {
     pub description_zh: Option<String>,
     pub raw_name_json: serde_json::Value,
     pub raw_description_json: Option<serde_json::Value>,
+    pub localizations: Vec<CatalogLocalization>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +37,7 @@ pub struct CatalogGroup {
     pub name_en: Option<String>,
     pub name_zh: Option<String>,
     pub raw_name_json: serde_json::Value,
+    pub localizations: Vec<CatalogLocalization>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +47,7 @@ pub struct CatalogCategory {
     pub name_en: Option<String>,
     pub name_zh: Option<String>,
     pub raw_name_json: serde_json::Value,
+    pub localizations: Vec<CatalogLocalization>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +60,7 @@ pub struct CatalogMarketGroup {
     pub description_zh: Option<String>,
     pub raw_name_json: serde_json::Value,
     pub raw_description_json: Option<serde_json::Value>,
+    pub localizations: Vec<CatalogLocalization>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
