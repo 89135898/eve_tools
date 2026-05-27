@@ -3,6 +3,8 @@ use evetools_sde::{
     CatalogArchive, CatalogCategory, CatalogGroup, CatalogMarketGroup, CatalogType, SdeMetadata,
 };
 
+static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn database_url() -> Option<String> {
     std::env::var("EVETOOLS_TEST_DATABASE_URL").ok()
 }
@@ -72,6 +74,7 @@ async fn imports_and_searches_catalog_rows() {
         eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
         return;
     };
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
     let pool = connect_pool(&url).await.unwrap();
     migrate_catalog_schema(&pool).await.unwrap();
     let repository = CatalogRepository::new(pool.clone());
@@ -144,6 +147,7 @@ async fn importing_same_successful_build_returns_current_status_without_new_impo
         eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
         return;
     };
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
     let pool = connect_pool(&url).await.unwrap();
     migrate_catalog_schema(&pool).await.unwrap();
     let repository = CatalogRepository::new(pool.clone());

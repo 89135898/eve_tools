@@ -1,16 +1,31 @@
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions},
+    PgPool,
+};
+use std::str::FromStr;
+
+const CATALOG_MIGRATION_LOCK_KEY: i64 = 912_345_678_901_234_568;
 
 pub async fn connect_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
+    let options = PgConnectOptions::from_str(database_url)?.statement_cache_capacity(0);
     PgPoolOptions::new()
         .max_connections(5)
-        .connect(database_url)
+        .connect_with(options)
         .await
 }
 
 pub async fn migrate_catalog_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CATALOG_MIGRATION_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+
     for statement in CATALOG_SCHEMA_STATEMENTS {
-        sqlx::query(statement).execute(pool).await?;
+        sqlx::query(statement).execute(&mut *tx).await?;
     }
+
+    tx.commit().await?;
     Ok(())
 }
 
