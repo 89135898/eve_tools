@@ -1,12 +1,13 @@
 use chrono::Utc;
 use evetools_sde::CatalogArchive;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use thiserror::Error;
 
 const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
 const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
+const IMPORT_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Error)]
 pub enum CatalogDbError {
@@ -683,6 +684,10 @@ fn should_report_table_progress(completed: usize, total: usize) -> bool {
     total > 0 && (completed == total || completed % TABLE_PROGRESS_REPORT_INTERVAL == 0)
 }
 
+fn import_batches<T>(rows: &[T]) -> impl Iterator<Item = &[T]> {
+    rows.chunks(IMPORT_BATCH_SIZE)
+}
+
 fn report_table_started<F>(progress: &mut F, table: CatalogImportTable, total: usize)
 where
     F: FnMut(CatalogImportProgress),
@@ -716,28 +721,32 @@ async fn insert_categories(
     let table = CatalogImportTable::Categories;
     let total = archive.categories.len();
     report_table_started(progress, table, total);
-    for (index, row) in archive.categories.iter().enumerate() {
-        sqlx::query(
+    let mut completed = 0;
+    for batch in import_batches(&archive.categories) {
+        let mut query = QueryBuilder::new(
             "INSERT INTO evetools_catalog.inventory_categories
-                (category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (category_id) DO UPDATE SET
+                (category_id, published, name_en, name_zh, raw_name_json, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, row| {
+            row_builder
+                .push_bind(row.category_id)
+                .push_bind(row.published)
+                .push_bind(row.name_en.as_deref())
+                .push_bind(row.name_zh.as_deref())
+                .push_bind(&row.raw_name_json)
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (category_id) DO UPDATE SET
                 published = EXCLUDED.published,
                 name_en = EXCLUDED.name_en,
                 name_zh = EXCLUDED.name_zh,
                 raw_name_json = EXCLUDED.raw_name_json,
                 updated_import_id = EXCLUDED.updated_import_id",
-        )
-        .persistent(false)
-        .bind(row.category_id)
-        .bind(row.published)
-        .bind(row.name_en.as_deref())
-        .bind(row.name_zh.as_deref())
-        .bind(&row.raw_name_json)
-        .bind(import_id)
-        .execute(&mut **tx)
-        .await?;
-        report_table_progress(progress, table, index + 1, total);
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -756,26 +765,35 @@ async fn insert_category_localizations(
         .sum();
     report_table_started(progress, table, total);
     let mut completed = 0;
-    for row in &archive.categories {
-        for localization in &row.localizations {
-            sqlx::query(
-                "INSERT INTO evetools_catalog.inventory_category_localizations
-                    (category_id, language, name, updated_import_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (category_id, language) DO UPDATE SET
+    let rows: Vec<_> = archive
+        .categories
+        .iter()
+        .flat_map(|row| {
+            row.localizations
+                .iter()
+                .map(move |localization| (row.category_id, localization))
+        })
+        .collect();
+    for batch in import_batches(&rows) {
+        let mut query = QueryBuilder::new(
+            "INSERT INTO evetools_catalog.inventory_category_localizations
+                (category_id, language, name, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, (category_id, localization)| {
+            row_builder
+                .push_bind(*category_id)
+                .push_bind(localization.language.as_str())
+                .push_bind(localization.name.as_deref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (category_id, language) DO UPDATE SET
                     name = EXCLUDED.name,
                     updated_import_id = EXCLUDED.updated_import_id",
-            )
-            .persistent(false)
-            .bind(row.category_id)
-            .bind(localization.language.as_str())
-            .bind(localization.name.as_deref())
-            .bind(import_id)
-            .execute(&mut **tx)
-            .await?;
-            completed += 1;
-            report_table_progress(progress, table, completed, total);
-        }
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -789,30 +807,34 @@ async fn insert_groups(
     let table = CatalogImportTable::Groups;
     let total = archive.groups.len();
     report_table_started(progress, table, total);
-    for (index, row) in archive.groups.iter().enumerate() {
-        sqlx::query(
+    let mut completed = 0;
+    for batch in import_batches(&archive.groups) {
+        let mut query = QueryBuilder::new(
             "INSERT INTO evetools_catalog.inventory_groups
-                (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (group_id) DO UPDATE SET
+                (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, row| {
+            row_builder
+                .push_bind(row.group_id)
+                .push_bind(row.category_id)
+                .push_bind(row.published)
+                .push_bind(row.name_en.as_deref())
+                .push_bind(row.name_zh.as_deref())
+                .push_bind(&row.raw_name_json)
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (group_id) DO UPDATE SET
                 category_id = EXCLUDED.category_id,
                 published = EXCLUDED.published,
                 name_en = EXCLUDED.name_en,
                 name_zh = EXCLUDED.name_zh,
                 raw_name_json = EXCLUDED.raw_name_json,
                 updated_import_id = EXCLUDED.updated_import_id",
-        )
-        .persistent(false)
-        .bind(row.group_id)
-        .bind(row.category_id)
-        .bind(row.published)
-        .bind(row.name_en.as_deref())
-        .bind(row.name_zh.as_deref())
-        .bind(&row.raw_name_json)
-        .bind(import_id)
-        .execute(&mut **tx)
-        .await?;
-        report_table_progress(progress, table, index + 1, total);
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -831,26 +853,35 @@ async fn insert_group_localizations(
         .sum();
     report_table_started(progress, table, total);
     let mut completed = 0;
-    for row in &archive.groups {
-        for localization in &row.localizations {
-            sqlx::query(
-                "INSERT INTO evetools_catalog.inventory_group_localizations
-                    (group_id, language, name, updated_import_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (group_id, language) DO UPDATE SET
+    let rows: Vec<_> = archive
+        .groups
+        .iter()
+        .flat_map(|row| {
+            row.localizations
+                .iter()
+                .map(move |localization| (row.group_id, localization))
+        })
+        .collect();
+    for batch in import_batches(&rows) {
+        let mut query = QueryBuilder::new(
+            "INSERT INTO evetools_catalog.inventory_group_localizations
+                (group_id, language, name, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, (group_id, localization)| {
+            row_builder
+                .push_bind(*group_id)
+                .push_bind(localization.language.as_str())
+                .push_bind(localization.name.as_deref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (group_id, language) DO UPDATE SET
                     name = EXCLUDED.name,
                     updated_import_id = EXCLUDED.updated_import_id",
-            )
-            .persistent(false)
-            .bind(row.group_id)
-            .bind(localization.language.as_str())
-            .bind(localization.name.as_deref())
-            .bind(import_id)
-            .execute(&mut **tx)
-            .await?;
-            completed += 1;
-            report_table_progress(progress, table, completed, total);
-        }
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -864,13 +895,27 @@ async fn insert_market_groups(
     let table = CatalogImportTable::MarketGroups;
     let total = archive.market_groups.len();
     report_table_started(progress, table, total);
-    for (index, row) in archive.market_groups.iter().enumerate() {
-        sqlx::query(
+    let mut completed = 0;
+    for batch in import_batches(&archive.market_groups) {
+        let mut query = QueryBuilder::new(
             "INSERT INTO evetools_catalog.market_groups
                 (market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
-                 raw_name_json, raw_description_json, updated_import_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (market_group_id) DO UPDATE SET
+                 raw_name_json, raw_description_json, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, row| {
+            row_builder
+                .push_bind(row.market_group_id)
+                .push_bind(row.parent_group_id)
+                .push_bind(row.name_en.as_deref())
+                .push_bind(row.name_zh.as_deref())
+                .push_bind(row.description_en.as_deref())
+                .push_bind(row.description_zh.as_deref())
+                .push_bind(&row.raw_name_json)
+                .push_bind(row.raw_description_json.as_ref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (market_group_id) DO UPDATE SET
                 parent_group_id = EXCLUDED.parent_group_id,
                 name_en = EXCLUDED.name_en,
                 name_zh = EXCLUDED.name_zh,
@@ -879,20 +924,10 @@ async fn insert_market_groups(
                 raw_name_json = EXCLUDED.raw_name_json,
                 raw_description_json = EXCLUDED.raw_description_json,
                 updated_import_id = EXCLUDED.updated_import_id",
-        )
-        .persistent(false)
-        .bind(row.market_group_id)
-        .bind(row.parent_group_id)
-        .bind(row.name_en.as_deref())
-        .bind(row.name_zh.as_deref())
-        .bind(row.description_en.as_deref())
-        .bind(row.description_zh.as_deref())
-        .bind(&row.raw_name_json)
-        .bind(row.raw_description_json.as_ref())
-        .bind(import_id)
-        .execute(&mut **tx)
-        .await?;
-        report_table_progress(progress, table, index + 1, total);
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -911,28 +946,37 @@ async fn insert_market_group_localizations(
         .sum();
     report_table_started(progress, table, total);
     let mut completed = 0;
-    for row in &archive.market_groups {
-        for localization in &row.localizations {
-            sqlx::query(
-                "INSERT INTO evetools_catalog.market_group_localizations
-                    (market_group_id, language, name, description, updated_import_id)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (market_group_id, language) DO UPDATE SET
+    let rows: Vec<_> = archive
+        .market_groups
+        .iter()
+        .flat_map(|row| {
+            row.localizations
+                .iter()
+                .map(move |localization| (row.market_group_id, localization))
+        })
+        .collect();
+    for batch in import_batches(&rows) {
+        let mut query = QueryBuilder::new(
+            "INSERT INTO evetools_catalog.market_group_localizations
+                (market_group_id, language, name, description, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, (market_group_id, localization)| {
+            row_builder
+                .push_bind(*market_group_id)
+                .push_bind(localization.language.as_str())
+                .push_bind(localization.name.as_deref())
+                .push_bind(localization.description.as_deref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (market_group_id, language) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     updated_import_id = EXCLUDED.updated_import_id",
-            )
-            .persistent(false)
-            .bind(row.market_group_id)
-            .bind(localization.language.as_str())
-            .bind(localization.name.as_deref())
-            .bind(localization.description.as_deref())
-            .bind(import_id)
-            .execute(&mut **tx)
-            .await?;
-            completed += 1;
-            report_table_progress(progress, table, completed, total);
-        }
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -946,14 +990,36 @@ async fn insert_types(
     let table = CatalogImportTable::Types;
     let total = archive.types.len();
     report_table_started(progress, table, total);
-    for (index, row) in archive.types.iter().enumerate() {
-        sqlx::query(
+    let mut completed = 0;
+    for batch in import_batches(&archive.types) {
+        let mut query = QueryBuilder::new(
             "INSERT INTO evetools_catalog.inventory_types
                 (type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
                  mass, portion_size, meta_level, name_en, name_zh, description_en, description_zh,
-                 raw_name_json, raw_description_json, updated_import_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-             ON CONFLICT (type_id) DO UPDATE SET
+                 raw_name_json, raw_description_json, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, row| {
+            row_builder
+                .push_bind(row.type_id)
+                .push_bind(row.group_id)
+                .push_bind(row.market_group_id)
+                .push_bind(row.published)
+                .push_bind(row.volume)
+                .push_bind(row.packaged_volume)
+                .push_bind(row.capacity)
+                .push_bind(row.mass)
+                .push_bind(row.portion_size)
+                .push_bind(row.meta_level)
+                .push_bind(row.name_en.as_deref())
+                .push_bind(row.name_zh.as_deref())
+                .push_bind(row.description_en.as_deref())
+                .push_bind(row.description_zh.as_deref())
+                .push_bind(&row.raw_name_json)
+                .push_bind(row.raw_description_json.as_ref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (type_id) DO UPDATE SET
                 group_id = EXCLUDED.group_id,
                 market_group_id = EXCLUDED.market_group_id,
                 published = EXCLUDED.published,
@@ -970,28 +1036,10 @@ async fn insert_types(
                 raw_name_json = EXCLUDED.raw_name_json,
                 raw_description_json = EXCLUDED.raw_description_json,
                 updated_import_id = EXCLUDED.updated_import_id",
-        )
-        .persistent(false)
-        .bind(row.type_id)
-        .bind(row.group_id)
-        .bind(row.market_group_id)
-        .bind(row.published)
-        .bind(row.volume)
-        .bind(row.packaged_volume)
-        .bind(row.capacity)
-        .bind(row.mass)
-        .bind(row.portion_size)
-        .bind(row.meta_level)
-        .bind(row.name_en.as_deref())
-        .bind(row.name_zh.as_deref())
-        .bind(row.description_en.as_deref())
-        .bind(row.description_zh.as_deref())
-        .bind(&row.raw_name_json)
-        .bind(row.raw_description_json.as_ref())
-        .bind(import_id)
-        .execute(&mut **tx)
-        .await?;
-        report_table_progress(progress, table, index + 1, total);
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -1010,28 +1058,37 @@ async fn insert_type_localizations(
         .sum();
     report_table_started(progress, table, total);
     let mut completed = 0;
-    for row in &archive.types {
-        for localization in &row.localizations {
-            sqlx::query(
-                "INSERT INTO evetools_catalog.inventory_type_localizations
-                    (type_id, language, name, description, updated_import_id)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (type_id, language) DO UPDATE SET
+    let rows: Vec<_> = archive
+        .types
+        .iter()
+        .flat_map(|row| {
+            row.localizations
+                .iter()
+                .map(move |localization| (row.type_id, localization))
+        })
+        .collect();
+    for batch in import_batches(&rows) {
+        let mut query = QueryBuilder::new(
+            "INSERT INTO evetools_catalog.inventory_type_localizations
+                (type_id, language, name, description, updated_import_id) ",
+        );
+        query.push_values(batch, |mut row_builder, (type_id, localization)| {
+            row_builder
+                .push_bind(*type_id)
+                .push_bind(localization.language.as_str())
+                .push_bind(localization.name.as_deref())
+                .push_bind(localization.description.as_deref())
+                .push_bind(import_id);
+        });
+        query.push(
+            " ON CONFLICT (type_id, language) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     updated_import_id = EXCLUDED.updated_import_id",
-            )
-            .persistent(false)
-            .bind(row.type_id)
-            .bind(localization.language.as_str())
-            .bind(localization.name.as_deref())
-            .bind(localization.description.as_deref())
-            .bind(import_id)
-            .execute(&mut **tx)
-            .await?;
-            completed += 1;
-            report_table_progress(progress, table, completed, total);
-        }
+        );
+        query.build().persistent(false).execute(&mut **tx).await?;
+        completed += batch.len();
+        report_table_progress(progress, table, completed, total);
     }
     Ok(())
 }
@@ -1155,6 +1212,14 @@ mod tests {
         assert!(!should_report_table_progress(1_001, 2_500));
         assert!(should_report_table_progress(2_000, 2_500));
         assert!(should_report_table_progress(2_500, 2_500));
+    }
+
+    #[test]
+    fn import_batches_split_rows_at_configured_batch_size() {
+        let rows = vec![0; IMPORT_BATCH_SIZE * 2 + 1];
+        let batch_sizes: Vec<usize> = import_batches(&rows).map(<[_]>::len).collect();
+
+        assert_eq!(batch_sizes, vec![IMPORT_BATCH_SIZE, IMPORT_BATCH_SIZE, 1]);
     }
 
     #[test]
