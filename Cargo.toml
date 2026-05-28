@@ -7,6 +7,7 @@ members = [
   "crates/sde",
   "crates/catalog",
   "crates/worker",
+  "crates/api",
   "crates/test-support",
   "apps/desktop/src-tauri"
 ]

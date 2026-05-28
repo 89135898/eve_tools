@@ -112,6 +112,20 @@ EVETOOLS_MARKET_SOURCE=fixture pnpm dev
 
 认证角色订单监控在 SSO 阶段前仍由 fixture 驱动。
 
+## 只读查询 API
+
+`crates/api` 提供第一版只读应用层 API。它不是 HTTP server，也不直接同步 ESI 数据；它封装 repository 查询，作为 Tauri commands 和未来 hosted API 之间的稳定边界。
+
+当前 API 覆盖：
+
+- catalog 导入状态。
+- 按 type id 查询本地化物品信息。
+- 按关键字搜索本地化物品信息。
+- 查询启用的 trade hubs。
+- 查询指定 station 的最新成功市场订单快照。
+
+未来引入 hosted API 时，应优先复用 `EveToolsReadApi`，再在外层增加 Axum、Supabase Edge Function 或其他 HTTP/RPC adapter。
+
 ## 静态 SDE Catalog
 
 EveTools 通过 Rust catalog service 将 CCP 官方 SDE JSON Lines 压缩包导入 Supabase Postgres。
@@ -199,6 +213,7 @@ React 不直接连接 Supabase。React 调用 Tauri commands，Tauri 再调用 R
 - `crates/sde`：SDE JSON Lines 压缩包发现和记录解析。
 - `crates/db`：Supabase/Postgres catalog schema 和 repository。
 - `crates/catalog`：用于导入和查询静态 SDE 数据的 Rust catalog service。
+- `crates/api`：只读查询 API，封装 catalog 和 market repository，供 Tauri 与未来 hosted API 复用。
 - `crates/worker`：同步状态和 worker 边界。
 - `crates/test-support`：本地 Postgres integration test 保护、schema 重建和远程测试库防误用。
 
