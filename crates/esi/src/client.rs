@@ -102,15 +102,37 @@ impl EsiClient {
         type_id: i32,
         order_type: EsiOrderType,
     ) -> Result<Vec<EsiMarketOrder>, EsiError> {
+        self.fetch_market_order_pages(region_id, Some(type_id), order_type)
+            .await
+    }
+
+    pub async fn region_market_orders(
+        &self,
+        region_id: i32,
+        order_type: EsiOrderType,
+    ) -> Result<Vec<EsiMarketOrder>, EsiError> {
+        self.fetch_market_order_pages(region_id, None, order_type)
+            .await
+    }
+
+    async fn fetch_market_order_pages(
+        &self,
+        region_id: i32,
+        type_id: Option<i32>,
+        order_type: EsiOrderType,
+    ) -> Result<Vec<EsiMarketOrder>, EsiError> {
         let mut current_page = 1;
         let mut orders = Vec::new();
 
         loop {
-            let url = format!(
-                "{}/latest/markets/{region_id}/orders/?datasource=tranquility&order_type={}&type_id={type_id}&page={current_page}",
+            let mut url = format!(
+                "{}/latest/markets/{region_id}/orders/?datasource=tranquility&order_type={}&page={current_page}",
                 self.base_url,
-                order_type.as_query_value()
+                order_type.as_query_value(),
             );
+            if let Some(type_id) = type_id {
+                url.push_str(&format!("&type_id={type_id}"));
+            }
             let request = self.http.get(url);
             let response = request.send().await.map_err(EsiError::Http)?;
             let total_pages = response

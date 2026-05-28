@@ -1,17 +1,21 @@
 use chrono::Utc;
-use evetools_sde::CatalogArchive;
-use serde::{Deserialize, Serialize};
-use sqlx::{
-    pool::PoolConnection, postgres::PgRow, PgPool, Postgres, QueryBuilder, Row, Transaction,
+use evetools_sde::{
+    CatalogArchive, CatalogCategory, CatalogGroup, CatalogLocalization, CatalogMarketGroup,
+    CatalogType,
 };
+use serde::{Deserialize, Serialize};
+use sqlx::{pool::PoolConnection, postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use std::collections::HashSet;
 use thiserror::Error;
 
 const CATALOG_IMPORT_LOCK_KEY: i64 = 912_345_678_901_234_567;
 const MAX_SEARCH_LIMIT: i64 = 100;
 const TABLE_PROGRESS_REPORT_INTERVAL: usize = 1_000;
-const IMPORT_BATCH_SIZE: usize = 500;
 const IMPORT_TABLE_MAX_ATTEMPTS: usize = 3;
+#[cfg(test)]
+const IMPORT_BATCH_EXECUTION_SCOPE: &str = "copy-staging";
 const IMPORT_TRANSACTION_SETUP_STATEMENTS: &[&str] = &[
+    "SET LOCAL lock_timeout = '15s'",
     "SET LOCAL idle_in_transaction_session_timeout = '60s'",
     "SET LOCAL statement_timeout = '120s'",
 ];
@@ -89,6 +93,28 @@ pub enum CatalogImportProgress {
     TableStarted {
         table: CatalogImportTable,
         total: usize,
+    },
+    BatchStarted {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        attempt: usize,
+    },
+    BatchMerging {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        attempt: usize,
+    },
+    BatchRetrying {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        next_attempt: usize,
+        error_summary: String,
     },
     TableAdvanced {
         table: CatalogImportTable,
@@ -740,8 +766,35 @@ fn should_report_table_progress(completed: usize, total: usize) -> bool {
     total > 0 && (completed == total || completed % TABLE_PROGRESS_REPORT_INTERVAL == 0)
 }
 
-fn import_batches<T>(rows: &[T]) -> impl Iterator<Item = &[T]> {
-    rows.chunks(IMPORT_BATCH_SIZE)
+fn market_groups_in_parent_order(rows: &[CatalogMarketGroup]) -> Vec<&CatalogMarketGroup> {
+    let mut ordered = Vec::with_capacity(rows.len());
+    let mut added = HashSet::with_capacity(rows.len());
+    let all_ids: HashSet<i32> = rows.iter().map(|row| row.market_group_id).collect();
+
+    while ordered.len() < rows.len() {
+        let previous_len = ordered.len();
+        for row in rows {
+            if added.contains(&row.market_group_id) {
+                continue;
+            }
+            if row.parent_group_id.map_or(true, |parent_id| {
+                added.contains(&parent_id) || !all_ids.contains(&parent_id)
+            }) {
+                added.insert(row.market_group_id);
+                ordered.push(row);
+            }
+        }
+
+        if ordered.len() == previous_len {
+            for row in rows {
+                if added.insert(row.market_group_id) {
+                    ordered.push(row);
+                }
+            }
+        }
+    }
+
+    ordered
 }
 
 fn report_table_started<F>(progress: &mut F, table: CatalogImportTable, total: usize)
@@ -749,6 +802,65 @@ where
     F: FnMut(CatalogImportProgress),
 {
     progress(CatalogImportProgress::TableStarted { table, total });
+}
+
+fn report_batch_started<F>(
+    progress: &mut F,
+    table: CatalogImportTable,
+    completed: usize,
+    total: usize,
+    batch_size: usize,
+    attempt: usize,
+) where
+    F: FnMut(CatalogImportProgress),
+{
+    progress(CatalogImportProgress::BatchStarted {
+        table,
+        completed,
+        total,
+        batch_size,
+        attempt,
+    });
+}
+
+fn report_batch_merging<F>(
+    progress: &mut F,
+    table: CatalogImportTable,
+    completed: usize,
+    total: usize,
+    batch_size: usize,
+    attempt: usize,
+) where
+    F: FnMut(CatalogImportProgress),
+{
+    progress(CatalogImportProgress::BatchMerging {
+        table,
+        completed,
+        total,
+        batch_size,
+        attempt,
+    });
+}
+
+fn report_batch_retrying<F>(
+    progress: &mut F,
+    table: CatalogImportTable,
+    completed: usize,
+    total: usize,
+    batch_size: usize,
+    next_attempt: usize,
+    error: &sqlx::Error,
+) where
+    F: FnMut(CatalogImportProgress),
+{
+    progress(CatalogImportProgress::BatchRetrying {
+        table,
+        completed,
+        total,
+        batch_size,
+        next_attempt,
+        error_summary: error.to_string(),
+    });
 }
 
 fn report_table_progress<F>(
@@ -768,55 +880,12 @@ fn report_table_progress<F>(
     }
 }
 
-macro_rules! define_import_table {
-    ($wrapper_name:ident, $insert_name:ident) => {
-        async fn $wrapper_name(
-            pool: &PgPool,
-            import_id: i64,
-            archive: &CatalogArchive,
-            progress: &mut impl FnMut(CatalogImportProgress),
-        ) -> Result<(), sqlx::Error> {
-            let mut attempt = 1;
-            loop {
-                let mut tx = begin_import_transaction(pool).await?;
-                match $insert_name(&mut tx, import_id, archive, progress).await {
-                    Ok(()) => match tx.commit().await {
-                        Ok(()) => return Ok(()),
-                        Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => return Err(error),
-                        Err(_) => {
-                            attempt += 1;
-                            continue;
-                        }
-                    },
-                    Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => {
-                        let _ = tx.rollback().await;
-                        return Err(error);
-                    }
-                    Err(_) => {
-                        let _ = tx.rollback().await;
-                        attempt += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-    };
+fn import_staging_batches<T>(rows: &[T], chunk_size: usize) -> impl Iterator<Item = &[T]> {
+    rows.chunks(chunk_size)
 }
 
-define_import_table!(import_categories, insert_categories);
-define_import_table!(import_category_localizations, insert_category_localizations);
-define_import_table!(import_groups, insert_groups);
-define_import_table!(import_group_localizations, insert_group_localizations);
-define_import_table!(import_market_groups, insert_market_groups);
-define_import_table!(
-    import_market_group_localizations,
-    insert_market_group_localizations
-);
-define_import_table!(import_types, insert_types);
-define_import_table!(import_type_localizations, insert_type_localizations);
-
-async fn insert_categories(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_categories(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -824,38 +893,27 @@ async fn insert_categories(
     let table = CatalogImportTable::Categories;
     let total = archive.categories.len();
     report_table_started(progress, table, total);
-    let mut completed = 0;
-    for batch in import_batches(&archive.categories) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_categories
-                (category_id, published, name_en, name_zh, raw_name_json, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, row| {
-            row_builder
-                .push_bind(row.category_id)
-                .push_bind(row.published)
-                .push_bind(row.name_en.as_deref())
-                .push_bind(row.name_zh.as_deref())
-                .push_bind(&row.raw_name_json)
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (category_id) DO UPDATE SET
-                published = EXCLUDED.published,
-                name_en = EXCLUDED.name_en,
-                name_zh = EXCLUDED.name_zh,
-                raw_name_json = EXCLUDED.raw_name_json,
-                updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &archive.categories,
+        StageSql {
+            table_name: STAGE_CATEGORIES_TABLE,
+            create_sql: CREATE_STAGE_CATEGORIES_SQL,
+            copy_sql: COPY_STAGE_CATEGORIES_SQL,
+            merge_sql: MERGE_STAGE_CATEGORIES_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_category_copy_row,
+    )
+    .await
 }
 
-async fn insert_category_localizations(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_category_localizations(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -867,7 +925,6 @@ async fn insert_category_localizations(
         .map(|row| row.localizations.len())
         .sum();
     report_table_started(progress, table, total);
-    let mut completed = 0;
     let rows: Vec<_> = archive
         .categories
         .iter()
@@ -877,32 +934,27 @@ async fn insert_category_localizations(
                 .map(move |localization| (row.category_id, localization))
         })
         .collect();
-    for batch in import_batches(&rows) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_category_localizations
-                (category_id, language, name, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, (category_id, localization)| {
-            row_builder
-                .push_bind(*category_id)
-                .push_bind(localization.language.as_str())
-                .push_bind(localization.name.as_deref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (category_id, language) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &rows,
+        StageSql {
+            table_name: STAGE_CATEGORY_LOCALIZATIONS_TABLE,
+            create_sql: CREATE_STAGE_CATEGORY_LOCALIZATIONS_SQL,
+            copy_sql: COPY_STAGE_CATEGORY_LOCALIZATIONS_SQL,
+            merge_sql: MERGE_STAGE_CATEGORY_LOCALIZATIONS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_category_localization_copy_row,
+    )
+    .await
 }
 
-async fn insert_groups(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_groups(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -910,40 +962,27 @@ async fn insert_groups(
     let table = CatalogImportTable::Groups;
     let total = archive.groups.len();
     report_table_started(progress, table, total);
-    let mut completed = 0;
-    for batch in import_batches(&archive.groups) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_groups
-                (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, row| {
-            row_builder
-                .push_bind(row.group_id)
-                .push_bind(row.category_id)
-                .push_bind(row.published)
-                .push_bind(row.name_en.as_deref())
-                .push_bind(row.name_zh.as_deref())
-                .push_bind(&row.raw_name_json)
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (group_id) DO UPDATE SET
-                category_id = EXCLUDED.category_id,
-                published = EXCLUDED.published,
-                name_en = EXCLUDED.name_en,
-                name_zh = EXCLUDED.name_zh,
-                raw_name_json = EXCLUDED.raw_name_json,
-                updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &archive.groups,
+        StageSql {
+            table_name: STAGE_GROUPS_TABLE,
+            create_sql: CREATE_STAGE_GROUPS_SQL,
+            copy_sql: COPY_STAGE_GROUPS_SQL,
+            merge_sql: MERGE_STAGE_GROUPS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_group_copy_row,
+    )
+    .await
 }
 
-async fn insert_group_localizations(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_group_localizations(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -955,7 +994,6 @@ async fn insert_group_localizations(
         .map(|row| row.localizations.len())
         .sum();
     report_table_started(progress, table, total);
-    let mut completed = 0;
     let rows: Vec<_> = archive
         .groups
         .iter()
@@ -965,32 +1003,27 @@ async fn insert_group_localizations(
                 .map(move |localization| (row.group_id, localization))
         })
         .collect();
-    for batch in import_batches(&rows) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_group_localizations
-                (group_id, language, name, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, (group_id, localization)| {
-            row_builder
-                .push_bind(*group_id)
-                .push_bind(localization.language.as_str())
-                .push_bind(localization.name.as_deref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (group_id, language) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &rows,
+        StageSql {
+            table_name: STAGE_GROUP_LOCALIZATIONS_TABLE,
+            create_sql: CREATE_STAGE_GROUP_LOCALIZATIONS_SQL,
+            copy_sql: COPY_STAGE_GROUP_LOCALIZATIONS_SQL,
+            merge_sql: MERGE_STAGE_GROUP_LOCALIZATIONS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_group_localization_copy_row,
+    )
+    .await
 }
 
-async fn insert_market_groups(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_market_groups(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -998,45 +1031,28 @@ async fn insert_market_groups(
     let table = CatalogImportTable::MarketGroups;
     let total = archive.market_groups.len();
     report_table_started(progress, table, total);
-    let mut completed = 0;
-    for batch in import_batches(&archive.market_groups) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.market_groups
-                (market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
-                 raw_name_json, raw_description_json, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, row| {
-            row_builder
-                .push_bind(row.market_group_id)
-                .push_bind(row.parent_group_id)
-                .push_bind(row.name_en.as_deref())
-                .push_bind(row.name_zh.as_deref())
-                .push_bind(row.description_en.as_deref())
-                .push_bind(row.description_zh.as_deref())
-                .push_bind(&row.raw_name_json)
-                .push_bind(row.raw_description_json.as_ref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (market_group_id) DO UPDATE SET
-                parent_group_id = EXCLUDED.parent_group_id,
-                name_en = EXCLUDED.name_en,
-                name_zh = EXCLUDED.name_zh,
-                description_en = EXCLUDED.description_en,
-                description_zh = EXCLUDED.description_zh,
-                raw_name_json = EXCLUDED.raw_name_json,
-                raw_description_json = EXCLUDED.raw_description_json,
-                updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    let rows = market_groups_in_parent_order(&archive.market_groups);
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &rows,
+        StageSql {
+            table_name: STAGE_MARKET_GROUPS_TABLE,
+            create_sql: CREATE_STAGE_MARKET_GROUPS_SQL,
+            copy_sql: COPY_STAGE_MARKET_GROUPS_SQL,
+            merge_sql: MERGE_STAGE_MARKET_GROUPS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_market_group_copy_row,
+    )
+    .await
 }
 
-async fn insert_market_group_localizations(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_market_group_localizations(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -1048,7 +1064,6 @@ async fn insert_market_group_localizations(
         .map(|row| row.localizations.len())
         .sum();
     report_table_started(progress, table, total);
-    let mut completed = 0;
     let rows: Vec<_> = archive
         .market_groups
         .iter()
@@ -1058,34 +1073,27 @@ async fn insert_market_group_localizations(
                 .map(move |localization| (row.market_group_id, localization))
         })
         .collect();
-    for batch in import_batches(&rows) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.market_group_localizations
-                (market_group_id, language, name, description, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, (market_group_id, localization)| {
-            row_builder
-                .push_bind(*market_group_id)
-                .push_bind(localization.language.as_str())
-                .push_bind(localization.name.as_deref())
-                .push_bind(localization.description.as_deref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (market_group_id, language) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    description = EXCLUDED.description,
-                    updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &rows,
+        StageSql {
+            table_name: STAGE_MARKET_GROUP_LOCALIZATIONS_TABLE,
+            create_sql: CREATE_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL,
+            copy_sql: COPY_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL,
+            merge_sql: MERGE_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_market_group_localization_copy_row,
+    )
+    .await
 }
 
-async fn insert_types(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_types(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -1093,62 +1101,27 @@ async fn insert_types(
     let table = CatalogImportTable::Types;
     let total = archive.types.len();
     report_table_started(progress, table, total);
-    let mut completed = 0;
-    for batch in import_batches(&archive.types) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_types
-                (type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
-                 mass, portion_size, meta_level, name_en, name_zh, description_en, description_zh,
-                 raw_name_json, raw_description_json, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, row| {
-            row_builder
-                .push_bind(row.type_id)
-                .push_bind(row.group_id)
-                .push_bind(row.market_group_id)
-                .push_bind(row.published)
-                .push_bind(row.volume)
-                .push_bind(row.packaged_volume)
-                .push_bind(row.capacity)
-                .push_bind(row.mass)
-                .push_bind(row.portion_size)
-                .push_bind(row.meta_level)
-                .push_bind(row.name_en.as_deref())
-                .push_bind(row.name_zh.as_deref())
-                .push_bind(row.description_en.as_deref())
-                .push_bind(row.description_zh.as_deref())
-                .push_bind(&row.raw_name_json)
-                .push_bind(row.raw_description_json.as_ref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (type_id) DO UPDATE SET
-                group_id = EXCLUDED.group_id,
-                market_group_id = EXCLUDED.market_group_id,
-                published = EXCLUDED.published,
-                volume = EXCLUDED.volume,
-                packaged_volume = EXCLUDED.packaged_volume,
-                capacity = EXCLUDED.capacity,
-                mass = EXCLUDED.mass,
-                portion_size = EXCLUDED.portion_size,
-                meta_level = EXCLUDED.meta_level,
-                name_en = EXCLUDED.name_en,
-                name_zh = EXCLUDED.name_zh,
-                description_en = EXCLUDED.description_en,
-                description_zh = EXCLUDED.description_zh,
-                raw_name_json = EXCLUDED.raw_name_json,
-                raw_description_json = EXCLUDED.raw_description_json,
-                updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
-        report_table_progress(progress, table, completed, total);
-    }
-    Ok(())
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &archive.types,
+        StageSql {
+            table_name: STAGE_TYPES_TABLE,
+            create_sql: CREATE_STAGE_TYPES_SQL,
+            copy_sql: COPY_STAGE_TYPES_SQL,
+            merge_sql: MERGE_STAGE_TYPES_SQL,
+        },
+        TYPE_COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_type_copy_row,
+    )
+    .await
 }
 
-async fn insert_type_localizations(
-    tx: &mut Transaction<'_, Postgres>,
+async fn import_type_localizations(
+    pool: &PgPool,
     import_id: i64,
     archive: &CatalogArchive,
     progress: &mut impl FnMut(CatalogImportProgress),
@@ -1160,7 +1133,6 @@ async fn insert_type_localizations(
         .map(|row| row.localizations.len())
         .sum();
     report_table_started(progress, table, total);
-    let mut completed = 0;
     let rows: Vec<_> = archive
         .types
         .iter()
@@ -1170,30 +1142,621 @@ async fn insert_type_localizations(
                 .map(move |localization| (row.type_id, localization))
         })
         .collect();
-    for batch in import_batches(&rows) {
-        let mut query = QueryBuilder::new(
-            "INSERT INTO evetools_catalog.inventory_type_localizations
-                (type_id, language, name, description, updated_import_id) ",
-        );
-        query.push_values(batch, |mut row_builder, (type_id, localization)| {
-            row_builder
-                .push_bind(*type_id)
-                .push_bind(localization.language.as_str())
-                .push_bind(localization.name.as_deref())
-                .push_bind(localization.description.as_deref())
-                .push_bind(import_id);
-        });
-        query.push(
-            " ON CONFLICT (type_id, language) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    description = EXCLUDED.description,
-                    updated_import_id = EXCLUDED.updated_import_id",
-        );
-        query.build().persistent(false).execute(&mut **tx).await?;
-        completed += batch.len();
+    copy_merge_rows_in_batches(
+        pool,
+        import_id,
+        &rows,
+        StageSql {
+            table_name: STAGE_TYPE_LOCALIZATIONS_TABLE,
+            create_sql: CREATE_STAGE_TYPE_LOCALIZATIONS_SQL,
+            copy_sql: COPY_STAGE_TYPE_LOCALIZATIONS_SQL,
+            merge_sql: MERGE_STAGE_TYPE_LOCALIZATIONS_SQL,
+        },
+        COPY_CHUNK_SIZE,
+        progress,
+        table,
+        total,
+        write_type_localization_copy_row,
+    )
+    .await
+}
+
+const COPY_CHUNK_SIZE: usize = 1_000;
+const TYPE_COPY_CHUNK_SIZE: usize = 250;
+
+const STAGE_CATEGORIES_TABLE: &str = "evetools_stage_inventory_categories";
+const CREATE_STAGE_CATEGORIES_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_categories (
+    category_id INTEGER NOT NULL,
+    published BOOLEAN NOT NULL,
+    name_en TEXT,
+    name_zh TEXT,
+    raw_name_json JSONB NOT NULL,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_CATEGORIES_SQL: &str = r#"COPY evetools_stage_inventory_categories
+    (category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_CATEGORIES_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_categories
+    (category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
+SELECT category_id, published, name_en, name_zh, raw_name_json, updated_import_id
+FROM evetools_stage_inventory_categories
+ON CONFLICT (category_id) DO UPDATE SET
+    published = EXCLUDED.published,
+    name_en = EXCLUDED.name_en,
+    name_zh = EXCLUDED.name_zh,
+    raw_name_json = EXCLUDED.raw_name_json,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_CATEGORY_LOCALIZATIONS_TABLE: &str = "evetools_stage_inventory_category_localizations";
+const CREATE_STAGE_CATEGORY_LOCALIZATIONS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_category_localizations (
+    category_id INTEGER NOT NULL,
+    language TEXT NOT NULL,
+    name TEXT,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_CATEGORY_LOCALIZATIONS_SQL: &str = r#"COPY evetools_stage_inventory_category_localizations
+    (category_id, language, name, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_CATEGORY_LOCALIZATIONS_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_category_localizations
+    (category_id, language, name, updated_import_id)
+SELECT category_id, language, name, updated_import_id
+FROM evetools_stage_inventory_category_localizations
+ON CONFLICT (category_id, language) DO UPDATE SET
+    name = EXCLUDED.name,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_GROUPS_TABLE: &str = "evetools_stage_inventory_groups";
+const CREATE_STAGE_GROUPS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_groups (
+    group_id INTEGER NOT NULL,
+    category_id INTEGER NOT NULL,
+    published BOOLEAN NOT NULL,
+    name_en TEXT,
+    name_zh TEXT,
+    raw_name_json JSONB NOT NULL,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_GROUPS_SQL: &str = r#"COPY evetools_stage_inventory_groups
+    (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_GROUPS_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_groups
+    (group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id)
+SELECT group_id, category_id, published, name_en, name_zh, raw_name_json, updated_import_id
+FROM evetools_stage_inventory_groups
+ON CONFLICT (group_id) DO UPDATE SET
+    category_id = EXCLUDED.category_id,
+    published = EXCLUDED.published,
+    name_en = EXCLUDED.name_en,
+    name_zh = EXCLUDED.name_zh,
+    raw_name_json = EXCLUDED.raw_name_json,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_GROUP_LOCALIZATIONS_TABLE: &str = "evetools_stage_inventory_group_localizations";
+const CREATE_STAGE_GROUP_LOCALIZATIONS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_group_localizations (
+    group_id INTEGER NOT NULL,
+    language TEXT NOT NULL,
+    name TEXT,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_GROUP_LOCALIZATIONS_SQL: &str = r#"COPY evetools_stage_inventory_group_localizations
+    (group_id, language, name, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_GROUP_LOCALIZATIONS_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_group_localizations
+    (group_id, language, name, updated_import_id)
+SELECT group_id, language, name, updated_import_id
+FROM evetools_stage_inventory_group_localizations
+ON CONFLICT (group_id, language) DO UPDATE SET
+    name = EXCLUDED.name,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_MARKET_GROUPS_TABLE: &str = "evetools_stage_market_groups";
+const CREATE_STAGE_MARKET_GROUPS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_market_groups (
+    market_group_id INTEGER NOT NULL,
+    parent_group_id INTEGER,
+    name_en TEXT,
+    name_zh TEXT,
+    description_en TEXT,
+    description_zh TEXT,
+    raw_name_json JSONB NOT NULL,
+    raw_description_json JSONB,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_MARKET_GROUPS_SQL: &str = r#"COPY evetools_stage_market_groups
+    (market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
+     raw_name_json, raw_description_json, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_MARKET_GROUPS_SQL: &str = r#"INSERT INTO evetools_catalog.market_groups
+    (market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
+     raw_name_json, raw_description_json, updated_import_id)
+SELECT market_group_id, parent_group_id, name_en, name_zh, description_en, description_zh,
+       raw_name_json, raw_description_json, updated_import_id
+FROM evetools_stage_market_groups
+ON CONFLICT (market_group_id) DO UPDATE SET
+    parent_group_id = EXCLUDED.parent_group_id,
+    name_en = EXCLUDED.name_en,
+    name_zh = EXCLUDED.name_zh,
+    description_en = EXCLUDED.description_en,
+    description_zh = EXCLUDED.description_zh,
+    raw_name_json = EXCLUDED.raw_name_json,
+    raw_description_json = EXCLUDED.raw_description_json,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_MARKET_GROUP_LOCALIZATIONS_TABLE: &str = "evetools_stage_market_group_localizations";
+const CREATE_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_market_group_localizations (
+    market_group_id INTEGER NOT NULL,
+    language TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL: &str = r#"COPY evetools_stage_market_group_localizations
+    (market_group_id, language, name, description, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_MARKET_GROUP_LOCALIZATIONS_SQL: &str = r#"INSERT INTO evetools_catalog.market_group_localizations
+    (market_group_id, language, name, description, updated_import_id)
+SELECT market_group_id, language, name, description, updated_import_id
+FROM evetools_stage_market_group_localizations
+ON CONFLICT (market_group_id, language) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_TYPES_TABLE: &str = "evetools_stage_inventory_types";
+const CREATE_STAGE_TYPES_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_types (
+    type_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    market_group_id INTEGER,
+    published BOOLEAN NOT NULL,
+    volume DOUBLE PRECISION,
+    packaged_volume DOUBLE PRECISION,
+    capacity DOUBLE PRECISION,
+    mass DOUBLE PRECISION,
+    portion_size INTEGER,
+    meta_level INTEGER,
+    name_en TEXT,
+    name_zh TEXT,
+    description_en TEXT,
+    description_zh TEXT,
+    raw_name_json JSONB NOT NULL,
+    raw_description_json JSONB,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_TYPES_SQL: &str = r#"COPY evetools_stage_inventory_types
+    (type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
+     mass, portion_size, meta_level, name_en, name_zh, description_en, description_zh,
+     raw_name_json, raw_description_json, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_TYPES_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_types
+    (type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
+     mass, portion_size, meta_level, name_en, name_zh, description_en, description_zh,
+     raw_name_json, raw_description_json, updated_import_id)
+SELECT type_id, group_id, market_group_id, published, volume, packaged_volume, capacity,
+       mass, portion_size, meta_level, name_en, name_zh, description_en, description_zh,
+       raw_name_json, raw_description_json, updated_import_id
+FROM evetools_stage_inventory_types
+ON CONFLICT (type_id) DO UPDATE SET
+    group_id = EXCLUDED.group_id,
+    market_group_id = EXCLUDED.market_group_id,
+    published = EXCLUDED.published,
+    volume = EXCLUDED.volume,
+    packaged_volume = EXCLUDED.packaged_volume,
+    capacity = EXCLUDED.capacity,
+    mass = EXCLUDED.mass,
+    portion_size = EXCLUDED.portion_size,
+    meta_level = EXCLUDED.meta_level,
+    name_en = EXCLUDED.name_en,
+    name_zh = EXCLUDED.name_zh,
+    description_en = EXCLUDED.description_en,
+    description_zh = EXCLUDED.description_zh,
+    raw_name_json = EXCLUDED.raw_name_json,
+    raw_description_json = EXCLUDED.raw_description_json,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+const STAGE_TYPE_LOCALIZATIONS_TABLE: &str = "evetools_stage_inventory_type_localizations";
+const CREATE_STAGE_TYPE_LOCALIZATIONS_SQL: &str = r#"CREATE TEMP TABLE evetools_stage_inventory_type_localizations (
+    type_id INTEGER NOT NULL,
+    language TEXT NOT NULL,
+    name TEXT,
+    description TEXT,
+    updated_import_id BIGINT NOT NULL
+)"#;
+const COPY_STAGE_TYPE_LOCALIZATIONS_SQL: &str = r#"COPY evetools_stage_inventory_type_localizations
+    (type_id, language, name, description, updated_import_id)
+    FROM STDIN WITH (FORMAT CSV, NULL '\N')"#;
+const MERGE_STAGE_TYPE_LOCALIZATIONS_SQL: &str = r#"INSERT INTO evetools_catalog.inventory_type_localizations
+    (type_id, language, name, description, updated_import_id)
+SELECT type_id, language, name, description, updated_import_id
+FROM evetools_stage_inventory_type_localizations
+ON CONFLICT (type_id, language) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    updated_import_id = EXCLUDED.updated_import_id"#;
+
+#[derive(Clone, Copy)]
+struct StageSql {
+    table_name: &'static str,
+    create_sql: &'static str,
+    copy_sql: &'static str,
+    merge_sql: &'static str,
+}
+
+async fn recreate_staging_table(
+    connection: &mut PoolConnection<Postgres>,
+    table_name: &str,
+    create_sql: &str,
+) -> Result<(), sqlx::Error> {
+    let drop_sql = format!("DROP TABLE IF EXISTS pg_temp.{table_name}");
+    sqlx::query(&drop_sql)
+        .persistent(false)
+        .execute(&mut **connection)
+        .await?;
+    sqlx::query(create_sql)
+        .persistent(false)
+        .execute(&mut **connection)
+        .await?;
+    Ok(())
+}
+
+async fn copy_merge_rows_in_batches<T>(
+    pool: &PgPool,
+    import_id: i64,
+    rows: &[T],
+    stage: StageSql,
+    chunk_size: usize,
+    progress: &mut impl FnMut(CatalogImportProgress),
+    table: CatalogImportTable,
+    total: usize,
+    mut write_row: impl FnMut(&mut String, &T, i64),
+) -> Result<(), sqlx::Error> {
+    let mut completed = 0;
+    for chunk in import_staging_batches(rows, chunk_size) {
+        let mut attempt = 1;
+        loop {
+            match copy_merge_batch(
+                pool,
+                import_id,
+                chunk,
+                stage,
+                progress,
+                table,
+                total,
+                completed,
+                attempt,
+                &mut write_row,
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(error) if attempt >= IMPORT_TABLE_MAX_ATTEMPTS => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    report_batch_retrying(
+                        progress,
+                        table,
+                        completed,
+                        total,
+                        chunk.len(),
+                        attempt,
+                        &error,
+                    );
+                }
+            }
+        }
+
+        completed += chunk.len();
         report_table_progress(progress, table, completed, total);
     }
     Ok(())
+}
+
+async fn copy_merge_batch<T>(
+    pool: &PgPool,
+    import_id: i64,
+    rows: &[T],
+    stage: StageSql,
+    progress: &mut impl FnMut(CatalogImportProgress),
+    table: CatalogImportTable,
+    total: usize,
+    completed: usize,
+    attempt: usize,
+    write_row: &mut impl FnMut(&mut String, &T, i64),
+) -> Result<(), sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    recreate_staging_table(&mut connection, stage.table_name, stage.create_sql).await?;
+    copy_rows(
+        &mut connection,
+        stage.copy_sql,
+        rows,
+        import_id,
+        progress,
+        table,
+        total,
+        completed,
+        attempt,
+        write_row,
+    )
+    .await?;
+    merge_staged_rows(
+        &mut connection,
+        stage.merge_sql,
+        progress,
+        table,
+        total,
+        completed,
+        rows.len(),
+        attempt,
+    )
+    .await
+}
+
+async fn copy_rows<T>(
+    connection: &mut PoolConnection<Postgres>,
+    copy_sql: &str,
+    rows: &[T],
+    import_id: i64,
+    progress: &mut impl FnMut(CatalogImportProgress),
+    table: CatalogImportTable,
+    total: usize,
+    completed: usize,
+    attempt: usize,
+    write_row: &mut impl FnMut(&mut String, &T, i64),
+) -> Result<(), sqlx::Error> {
+    let mut copy = connection.copy_in_raw(copy_sql).await?;
+    let mut buffer = String::with_capacity(1024 * 1024);
+    report_batch_started(progress, table, completed, total, rows.len(), attempt);
+    for row in rows {
+        write_row(&mut buffer, row, import_id);
+    }
+    copy.send(buffer.as_bytes()).await?;
+    copy.finish().await?;
+    Ok(())
+}
+
+async fn merge_staged_rows(
+    connection: &mut PoolConnection<Postgres>,
+    merge_sql: &str,
+    progress: &mut impl FnMut(CatalogImportProgress),
+    table: CatalogImportTable,
+    total: usize,
+    completed: usize,
+    batch_size: usize,
+    attempt: usize,
+) -> Result<(), sqlx::Error> {
+    report_batch_merging(progress, table, completed, total, batch_size, attempt);
+    sqlx::query(merge_sql)
+        .persistent(false)
+        .execute(&mut **connection)
+        .await?;
+    Ok(())
+}
+
+fn write_category_copy_row(buffer: &mut String, row: &CatalogCategory, import_id: i64) {
+    push_copy_i32(buffer, row.category_id);
+    push_copy_separator(buffer);
+    push_copy_bool(buffer, row.published);
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_json(buffer, &row.raw_name_json);
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn write_category_localization_copy_row(
+    buffer: &mut String,
+    (category_id, localization): &(i32, &CatalogLocalization),
+    import_id: i64,
+) {
+    push_copy_i32(buffer, *category_id);
+    push_copy_separator(buffer);
+    write_localization_name_columns(buffer, localization, import_id);
+}
+
+fn write_group_copy_row(buffer: &mut String, row: &CatalogGroup, import_id: i64) {
+    push_copy_i32(buffer, row.group_id);
+    push_copy_separator(buffer);
+    push_copy_i32(buffer, row.category_id);
+    push_copy_separator(buffer);
+    push_copy_bool(buffer, row.published);
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_json(buffer, &row.raw_name_json);
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn write_group_localization_copy_row(
+    buffer: &mut String,
+    (group_id, localization): &(i32, &CatalogLocalization),
+    import_id: i64,
+) {
+    push_copy_i32(buffer, *group_id);
+    push_copy_separator(buffer);
+    write_localization_name_columns(buffer, localization, import_id);
+}
+
+fn write_market_group_copy_row(buffer: &mut String, row: &&CatalogMarketGroup, import_id: i64) {
+    let row = *row;
+    push_copy_i32(buffer, row.market_group_id);
+    push_copy_separator(buffer);
+    push_copy_optional_i32(buffer, row.parent_group_id);
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.description_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.description_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_json(buffer, &row.raw_name_json);
+    push_copy_separator(buffer);
+    push_copy_optional_json(buffer, row.raw_description_json.as_ref());
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn write_market_group_localization_copy_row(
+    buffer: &mut String,
+    (market_group_id, localization): &(i32, &CatalogLocalization),
+    import_id: i64,
+) {
+    push_copy_i32(buffer, *market_group_id);
+    push_copy_separator(buffer);
+    write_localization_name_description_columns(buffer, localization, import_id);
+}
+
+fn write_type_copy_row(buffer: &mut String, row: &CatalogType, import_id: i64) {
+    push_copy_i32(buffer, row.type_id);
+    push_copy_separator(buffer);
+    push_copy_i32(buffer, row.group_id);
+    push_copy_separator(buffer);
+    push_copy_optional_i32(buffer, row.market_group_id);
+    push_copy_separator(buffer);
+    push_copy_bool(buffer, row.published);
+    push_copy_separator(buffer);
+    push_copy_optional_f64(buffer, row.volume);
+    push_copy_separator(buffer);
+    push_copy_optional_f64(buffer, row.packaged_volume);
+    push_copy_separator(buffer);
+    push_copy_optional_f64(buffer, row.capacity);
+    push_copy_separator(buffer);
+    push_copy_optional_f64(buffer, row.mass);
+    push_copy_separator(buffer);
+    push_copy_optional_i32(buffer, row.portion_size);
+    push_copy_separator(buffer);
+    push_copy_optional_i32(buffer, row.meta_level);
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.name_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.description_en.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, row.description_zh.as_deref());
+    push_copy_separator(buffer);
+    push_copy_json(buffer, &row.raw_name_json);
+    push_copy_separator(buffer);
+    push_copy_optional_json(buffer, row.raw_description_json.as_ref());
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn write_type_localization_copy_row(
+    buffer: &mut String,
+    (type_id, localization): &(i32, &CatalogLocalization),
+    import_id: i64,
+) {
+    push_copy_i32(buffer, *type_id);
+    push_copy_separator(buffer);
+    write_localization_name_description_columns(buffer, localization, import_id);
+}
+
+fn write_localization_name_columns(
+    buffer: &mut String,
+    localization: &CatalogLocalization,
+    import_id: i64,
+) {
+    push_copy_cell(buffer, Some(localization.language.as_str()));
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, localization.name.as_deref());
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn write_localization_name_description_columns(
+    buffer: &mut String,
+    localization: &CatalogLocalization,
+    import_id: i64,
+) {
+    push_copy_cell(buffer, Some(localization.language.as_str()));
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, localization.name.as_deref());
+    push_copy_separator(buffer);
+    push_copy_cell(buffer, localization.description.as_deref());
+    push_copy_separator(buffer);
+    push_copy_i64(buffer, import_id);
+    finish_copy_row(buffer);
+}
+
+fn push_copy_separator(buffer: &mut String) {
+    buffer.push(',');
+}
+
+fn finish_copy_row(buffer: &mut String) {
+    buffer.push('\n');
+}
+
+fn push_copy_bool(buffer: &mut String, value: bool) {
+    buffer.push_str(if value { "true" } else { "false" });
+}
+
+fn push_copy_i32(buffer: &mut String, value: i32) {
+    buffer.push_str(&value.to_string());
+}
+
+fn push_copy_i64(buffer: &mut String, value: i64) {
+    buffer.push_str(&value.to_string());
+}
+
+fn push_copy_optional_i32(buffer: &mut String, value: Option<i32>) {
+    match value {
+        Some(value) => push_copy_i32(buffer, value),
+        None => push_copy_cell(buffer, None),
+    }
+}
+
+fn push_copy_optional_f64(buffer: &mut String, value: Option<f64>) {
+    match value {
+        Some(value) => buffer.push_str(&value.to_string()),
+        None => push_copy_cell(buffer, None),
+    }
+}
+
+fn push_copy_json(buffer: &mut String, value: &serde_json::Value) {
+    push_copy_cell(buffer, Some(&value.to_string()));
+}
+
+fn push_copy_optional_json(buffer: &mut String, value: Option<&serde_json::Value>) {
+    match value {
+        Some(value) => push_copy_json(buffer, value),
+        None => push_copy_cell(buffer, None),
+    }
+}
+
+fn push_copy_cell(buffer: &mut String, value: Option<&str>) {
+    let Some(value) = value else {
+        buffer.push_str(r"\N");
+        return;
+    };
+
+    let needs_quotes = value == r"\N"
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r');
+    if !needs_quotes {
+        buffer.push_str(value);
+        return;
+    }
+
+    buffer.push('"');
+    for character in value.chars() {
+        if character == '"' {
+            buffer.push('"');
+        }
+        buffer.push(character);
+    }
+    buffer.push('"');
 }
 
 async fn delete_stale_catalog_rows(
@@ -1302,6 +1865,20 @@ mod tests {
         }
     }
 
+    fn market_group(market_group_id: i32, parent_group_id: Option<i32>) -> CatalogMarketGroup {
+        CatalogMarketGroup {
+            market_group_id,
+            parent_group_id,
+            name_en: None,
+            name_zh: None,
+            description_en: None,
+            description_zh: None,
+            raw_name_json: serde_json::json!({}),
+            raw_description_json: None,
+            localizations: Vec::new(),
+        }
+    }
+
     #[test]
     fn search_limit_rejects_non_positive_values_and_clamps_large_values() {
         assert_eq!(search_limit(0), None);
@@ -1366,16 +1943,53 @@ mod tests {
     }
 
     #[test]
-    fn import_batches_split_rows_at_configured_batch_size() {
-        let rows = vec![0; IMPORT_BATCH_SIZE * 2 + 1];
-        let batch_sizes: Vec<usize> = import_batches(&rows).map(<[_]>::len).collect();
+    fn market_groups_are_ordered_parent_first_for_batch_imports() {
+        let rows = vec![
+            market_group(30, Some(20)),
+            market_group(20, Some(10)),
+            market_group(10, None),
+        ];
+        let ordered_ids: Vec<i32> = market_groups_in_parent_order(&rows)
+            .into_iter()
+            .map(|row| row.market_group_id)
+            .collect();
 
-        assert_eq!(batch_sizes, vec![IMPORT_BATCH_SIZE, IMPORT_BATCH_SIZE, 1]);
+        assert_eq!(ordered_ids, vec![10, 20, 30]);
     }
 
     #[test]
-    fn import_table_transactions_are_bounded_and_retried() {
+    fn import_batches_use_implicit_statement_transactions_and_retries() {
+        assert_eq!(IMPORT_BATCH_EXECUTION_SCOPE, "copy-staging");
         assert!(IMPORT_TABLE_MAX_ATTEMPTS > 1);
+    }
+
+    #[test]
+    fn staging_batches_split_copy_and_merge_work() {
+        let rows = vec![0; COPY_CHUNK_SIZE * 2 + 1];
+        let batch_sizes: Vec<usize> = import_staging_batches(&rows, COPY_CHUNK_SIZE)
+            .map(<[_]>::len)
+            .collect();
+
+        assert_eq!(batch_sizes, vec![COPY_CHUNK_SIZE, COPY_CHUNK_SIZE, 1]);
+    }
+
+    #[test]
+    fn copy_csv_cells_escape_special_values_and_nulls() {
+        let mut row = String::new();
+        push_copy_cell(&mut row, Some("simple"));
+        row.push(',');
+        push_copy_cell(&mut row, None);
+        row.push(',');
+        push_copy_cell(&mut row, Some("a,b\"c\n"));
+
+        assert_eq!(row, "simple,\\N,\"a,b\"\"c\n\"");
+    }
+
+    #[test]
+    fn explicit_import_metadata_transactions_are_bounded() {
+        assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
+            .iter()
+            .any(|statement| statement.contains("lock_timeout")));
         assert!(IMPORT_TRANSACTION_SETUP_STATEMENTS
             .iter()
             .any(|statement| statement.contains("idle_in_transaction_session_timeout")));

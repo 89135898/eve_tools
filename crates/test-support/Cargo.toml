@@ -1,17 +1,11 @@
 [package]
-name = "evetools-catalog"
+name = "evetools-test-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-evetools-db = { path = "../db" }
-evetools-sde = { path = "../sde" }
 sqlx.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 url.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

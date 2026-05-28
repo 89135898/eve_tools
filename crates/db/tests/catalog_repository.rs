@@ -3,12 +3,10 @@ use evetools_sde::{
     CatalogArchive, CatalogCategory, CatalogGroup, CatalogLocalization, CatalogMarketGroup,
     CatalogType, SdeMetadata,
 };
+use evetools_test_support::{guarded_database_url_from_env, reset_evetools_catalog_schema};
+use sqlx::PgPool;
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn database_url() -> Option<String> {
-    std::env::var("EVETOOLS_TEST_DATABASE_URL").ok()
-}
 
 fn sample_archive() -> CatalogArchive {
     CatalogArchive {
@@ -115,6 +113,22 @@ fn sample_archive() -> CatalogArchive {
     }
 }
 
+async fn prepare_catalog_repository() -> Option<(PgPool, CatalogRepository)> {
+    let url = match guarded_database_url_from_env() {
+        Ok(Some(url)) => url,
+        Ok(None) => {
+            eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
+            return None;
+        }
+        Err(error) => panic!("{error}"),
+    };
+    let pool = connect_pool(&url).await.unwrap();
+    reset_evetools_catalog_schema(&pool).await.unwrap();
+    migrate_catalog_schema(&pool).await.unwrap();
+    let repository = CatalogRepository::new(pool.clone());
+    Some((pool, repository))
+}
+
 fn sample_archive_without_type_34() -> CatalogArchive {
     let mut archive = sample_archive();
     archive.metadata.build_number = Some(3_351_824);
@@ -124,14 +138,10 @@ fn sample_archive_without_type_34() -> CatalogArchive {
 
 #[tokio::test]
 async fn imports_and_searches_catalog_rows() {
-    let Some(url) = database_url() else {
-        eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((_pool, repository)) = prepare_catalog_repository().await else {
         return;
     };
-    let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let pool = connect_pool(&url).await.unwrap();
-    migrate_catalog_schema(&pool).await.unwrap();
-    let repository = CatalogRepository::new(pool.clone());
 
     let status = repository
         .import_archive(ImportCatalogInput {
@@ -210,14 +220,10 @@ async fn imports_and_searches_catalog_rows() {
 
 #[tokio::test]
 async fn importing_same_successful_build_returns_current_status_without_new_import_row() {
-    let Some(url) = database_url() else {
-        eprintln!("skipping Postgres test: EVETOOLS_TEST_DATABASE_URL is not set");
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let Some((pool, repository)) = prepare_catalog_repository().await else {
         return;
     };
-    let _guard = POSTGRES_TEST_LOCK.lock().await;
-    let pool = connect_pool(&url).await.unwrap();
-    migrate_catalog_schema(&pool).await.unwrap();
-    let repository = CatalogRepository::new(pool.clone());
     let archive = sample_archive();
 
     let first_status = repository

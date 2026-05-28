@@ -6,4 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+evetools-db = { path = "../db" }
+evetools-esi = { path = "../esi" }
 serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+evetools-test-support = { path = "../test-support" }
+httpmock = "0.8.3"
+tokio.workspace = true

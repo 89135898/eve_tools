@@ -52,9 +52,38 @@ pnpm dev
 pnpm build
 ```
 
+### 企业级测试基线
+
+默认测试分三层：
+
+- 纯 Rust/TypeScript 单元测试：不需要数据库，`cargo test --workspace` 和 `pnpm typecheck` 会直接运行。
+- Postgres integration tests：只允许连接本地一次性 Postgres，测试开始会删除并重建 `evetools_catalog` schema。
+- 远程 Supabase 验证：默认禁止，只有人工确认要破坏性测试远程库时才显式开启。
+
+推荐使用仓库内的本地测试库：
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+export EVETOOLS_TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:54329/evetools_test?sslmode=disable'
+
+cargo test -p evetools-test-support
+cargo test -p evetools-db --test catalog_repository -- --nocapture
+cargo test -p evetools-db --test market_repository -- --nocapture
+cargo test -p evetools-worker --test public_market_sync -- --nocapture
+cargo test --workspace
+
+docker compose -f docker-compose.test.yml down -v
+```
+
+`EVETOOLS_TEST_DATABASE_URL` 如果指向非本地主机，测试会直接失败，避免误把完整 Supabase catalog 用 fixture 覆盖。只有在你确实准备好使用可丢弃远程库时，才可以临时开启：
+
+```bash
+export EVETOOLS_TEST_DATABASE_ALLOW_REMOTE=1
+```
+
 ## 公开 ESI 市场同步
 
-桌面应用可以使用公开 ESI 数据驱动 Jita 市场查询和选品看板。
+桌面应用可以使用公开 ESI 数据驱动 Jita 市场查询和选品看板。后端同时具备第一版 Supabase 市场订单同步基础，可按主流 NPC trade hub 过滤并保存公开区域订单快照。
 
 市场数据源由 `EVETOOLS_MARKET_SOURCE` 控制：
 
@@ -72,12 +101,14 @@ EVETOOLS_MARKET_SOURCE=fixture pnpm dev
 - `GET /markets/{region_id}/orders/`
 - `GET /markets/{region_id}/history/`
 
-当前公开数据切片刻意保持较小范围：
+当前桌面 UI 公开数据切片刻意保持较小范围：
 
 - 只覆盖 The Forge 区域。
 - 只使用 Jita 4-4 空间站订单做 top-of-book 分析。
 - 选品发现使用固定种子池。
 - 公开 ESI 网络、状态码或解码失败时使用 fixture fallback。
+
+市场订单持久化切片已经定义以下 NPC trade hubs：Jita、Amarr、Dodixie、Rens、Hek。Worker 层会从 `GET /markets/{region_id}/orders/` 拉取区域公开订单，按这些 station ID 过滤后写入 Supabase 的 `trade_hubs`、`market_sync_runs` 和 `market_order_snapshots` 表。后续 Selection Discovery 会基于这些快照替换固定种子池。
 
 认证角色订单监控在 SSO 阶段前仍由 fixture 驱动。
 
@@ -102,14 +133,15 @@ pnpm dev
 
 URL 必须启用 SSL。没有 query 参数时使用 `?sslmode=require`；如果 URL 已有 query 参数，则追加 `&sslmode=require`。如果你已在 Supabase 启用 SSL enforcement，并在本地安装了项目 CA 证书，`sslmode=verify-full` 更强。
 
-需要让 repository integration tests 真实访问 Postgres 时，使用单独的测试 URL：
+需要让 repository integration tests 真实访问 Postgres 时，使用本地一次性测试 URL：
 
 ```bash
-export EVETOOLS_TEST_DATABASE_URL="<dev-or-test-supabase-postgres-url-with-sslmode-require>"
+docker compose -f docker-compose.test.yml up -d
+export EVETOOLS_TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:54329/evetools_test?sslmode=disable'
 cargo test -p evetools-db --test catalog_repository -- --nocapture
 ```
 
-未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。Importer 拥有 `evetools_catalog` schema，并会在每次成功导入后替换 catalog rows，所以测试请使用开发用或可丢弃的 Supabase project。不要让 `EVETOOLS_TEST_DATABASE_URL` 指向保存完整 catalog 的同一个数据库，否则测试样例会把完整 SDE 数据替换成一行 fixture。
+未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。测试启动后会先 `DROP SCHEMA evetools_catalog CASCADE` 再迁移 schema，因此它只适合本地 disposable Postgres。`evetools-test-support` 默认拒绝非本地主机，避免测试样例把完整 SDE 数据替换成一行 fixture。
 
 需要手动初始化或修复完整官方 SDE catalog 时，使用 admin CLI：
 
@@ -120,9 +152,17 @@ cargo run -p evetools-catalog --bin import-sde-latest
 
 这个 CLI 只是薄入口：读取 `EVETOOLS_DATABASE_URL`，调用 Rust `CatalogService::import_latest()`，并输出导入状态和行数。正式维护时可以把同一套 service 方法接到 hosted job、worker、GitHub Actions 或 Supabase 托管函数上；不要把特权数据库连接串分发给最终用户桌面端。
 
-CLI 会显示阶段级进度：检查 SDE metadata、检查当前 catalog、下载完成大小、解析后的行数、写入 Postgres 的分表行数，以及最终状态。下载阶段第一版不显示百分比；写库阶段每 1000 行和每张表最后一行报告一次。
+CLI 会显示阶段级进度：检查 SDE metadata、检查当前 catalog、下载或复用本地缓存、解析后的行数、写入 Postgres 的分表行数，以及最终状态。下载阶段第一版不显示百分比；写库阶段每 1000 行和每张表最后一行报告一次。
 
-如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断。当前 importer 会拒绝 transaction pooler，并将写入拆成表级短事务；每张表事务会设置语句超时和 idle-in-transaction 超时，遇到连接卡住时最多重试 3 次，最后才标记导入成功。
+Importer 会按 SDE build number 将下载的 zip 暂存到本地缓存，默认目录是系统临时目录下的 `evetools/sde`。也可以用 `EVETOOLS_SDE_CACHE_DIR` 指定目录：
+
+```bash
+export EVETOOLS_SDE_CACHE_DIR="$PWD/.cache/sde"
+```
+
+数据库已经是完整最新版本时不会下载。导入失败时，缓存文件会保留，下一次重试会直接复用同一 build 的 zip；导入成功并写库完成后，缓存文件会被删除。
+
+如果导入曾经长时间停在某张表的 `0 / total`，先检查连接串是否用了 transaction pooler。已卡住的进程可以用 `Ctrl+C` 中断。当前 importer 会拒绝 transaction pooler，并使用按批次执行的 `COPY -> session temp staging table -> merge` 写入链路；每批独立提交，失败时只重试当前批次，避免整张大表一次性 merge 长时间占用连接。旧 catalog rows 的清理只会在分表写入完成后执行，最后才标记导入成功。
 
 SDE 实体名和描述会导入到标准化 localization 表中。`get_inventory_type` 和 `search_inventory_types` 在服务端根据请求语言选择显示名，前端只传当前语言，不解析 SDE 多语言 JSON。语言 fallback 顺序为精确语言、基础语言、中文 fallback、英文 fallback，再退回任意可用名称。升级到包含 localization 表的版本后，需要重新运行一次完整 SDE 导入来填充这些表。
 
@@ -150,6 +190,7 @@ React 不直接连接 Supabase。React 调用 Tauri commands，Tauri 再调用 R
 - `crates/db`：Supabase/Postgres catalog schema 和 repository。
 - `crates/catalog`：用于导入和查询静态 SDE 数据的 Rust catalog service。
 - `crates/worker`：同步状态和 worker 边界。
+- `crates/test-support`：本地 Postgres integration test 保护、schema 重建和远程测试库防误用。
 
 桌面应用位于 `apps/desktop`：
 

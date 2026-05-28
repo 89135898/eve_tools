@@ -1,6 +1,7 @@
 use evetools_catalog::{
     CatalogConfig, CatalogImportProgress, CatalogService, CatalogServiceError, CatalogStatus,
 };
+use std::io::Write;
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +15,10 @@ async fn run() -> Result<(), CatalogServiceError> {
     let config = CatalogConfig::from_env()?;
     let service = CatalogService::connect(config).await?;
     let status = service
-        .import_latest_with_progress(|progress| println!("{}", format_progress(&progress)))
+        .import_latest_with_progress(|progress| {
+            println!("{}", format_progress(&progress));
+            let _ = std::io::stdout().flush();
+        })
         .await?;
     print_status(&status);
     Ok(())
@@ -39,6 +43,13 @@ fn format_progress(progress: &CatalogImportProgress) -> String {
         CatalogImportProgress::DownloadedArchive { byte_count } => {
             format!("[3/5] downloaded archive: {}", format_mib(*byte_count))
         }
+        CatalogImportProgress::UsingCachedArchive { path, byte_count } => {
+            format!(
+                "[3/5] using cached archive: {} ({})",
+                path,
+                format_mib(*byte_count)
+            )
+        }
         CatalogImportProgress::ParsingArchive => "[4/5] parsing archive...".to_string(),
         CatalogImportProgress::ParsedArchive {
             type_count,
@@ -51,6 +62,43 @@ fn format_progress(progress: &CatalogImportProgress) -> String {
         CatalogImportProgress::WritingCatalog => "[5/5] writing to Postgres...".to_string(),
         CatalogImportProgress::WritingTableStarted { table, total } => {
             format!("      {}: 0 / {total}", table.as_str())
+        }
+        CatalogImportProgress::WritingBatchStarted {
+            table,
+            completed,
+            total,
+            batch_size,
+            attempt,
+        } => {
+            format!(
+                "      {}: {completed} / {total} writing next {batch_size} rows (attempt {attempt})",
+                table.as_str()
+            )
+        }
+        CatalogImportProgress::WritingBatchMerging {
+            table,
+            completed,
+            total,
+            batch_size,
+            attempt,
+        } => {
+            format!(
+                "      {}: {completed} / {total} merging next {batch_size} staged rows (attempt {attempt})",
+                table.as_str()
+            )
+        }
+        CatalogImportProgress::WritingBatchRetrying {
+            table,
+            completed,
+            total,
+            batch_size,
+            next_attempt,
+            error_summary,
+        } => {
+            format!(
+                "      {}: {completed} / {total} retrying next {batch_size} rows (attempt {next_attempt}): {error_summary}",
+                table.as_str()
+            )
         }
         CatalogImportProgress::WritingRows {
             table,
@@ -132,6 +180,35 @@ mod tests {
         assert_eq!(
             format_progress(&progress),
             "[3/5] downloaded archive: 100.0 MiB"
+        );
+    }
+
+    #[test]
+    fn formats_cached_archive_usage() {
+        let progress = CatalogImportProgress::UsingCachedArchive {
+            path: "/tmp/evetools/sde/eve-online-static-data-3351823-jsonl.zip".to_string(),
+            byte_count: 104_857_600,
+        };
+
+        assert_eq!(
+            format_progress(&progress),
+            "[3/5] using cached archive: /tmp/evetools/sde/eve-online-static-data-3351823-jsonl.zip (100.0 MiB)"
+        );
+    }
+
+    #[test]
+    fn formats_batch_merge_progress() {
+        let progress = CatalogImportProgress::WritingBatchMerging {
+            table: CatalogImportTable::Types,
+            completed: 2_000,
+            total: 52_074,
+            batch_size: 1_000,
+            attempt: 2,
+        };
+
+        assert_eq!(
+            format_progress(&progress),
+            "      types: 2000 / 52074 merging next 1000 staged rows (attempt 2)"
         );
     }
 }

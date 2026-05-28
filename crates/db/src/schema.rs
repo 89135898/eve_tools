@@ -1,15 +1,22 @@
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
-    PgPool,
+    Executor, PgPool,
 };
 use std::str::FromStr;
 
 const CATALOG_MIGRATION_LOCK_KEY: i64 = 912_345_678_901_234_568;
+const CATALOG_SESSION_SETUP_SQL: &str = "SET lock_timeout = '15s'; SET statement_timeout = '300s'";
 
 pub async fn connect_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let options = PgConnectOptions::from_str(database_url)?.statement_cache_capacity(0);
     PgPoolOptions::new()
         .max_connections(5)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                connection.execute(CATALOG_SESSION_SETUP_SQL).await?;
+                Ok(())
+            })
+        })
         .connect_with(options)
         .await
 }
@@ -126,6 +133,44 @@ const CATALOG_SCHEMA_STATEMENTS: &[&str] = &[
         updated_import_id BIGINT NOT NULL REFERENCES evetools_catalog.sde_imports(import_id),
         PRIMARY KEY (type_id, language)
     )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.trade_hubs (
+        hub_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        region_id INTEGER NOT NULL,
+        system_id INTEGER NOT NULL,
+        station_id BIGINT NOT NULL,
+        enabled BOOLEAN NOT NULL,
+        sort_order INTEGER NOT NULL,
+        PRIMARY KEY (hub_id)
+    )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.market_sync_runs (
+        sync_run_id BIGSERIAL PRIMARY KEY,
+        region_id INTEGER NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        status TEXT NOT NULL,
+        page_count INTEGER NOT NULL DEFAULT 0,
+        order_count BIGINT NOT NULL DEFAULT 0,
+        error_summary TEXT,
+        source TEXT NOT NULL
+    )"#,
+    r#"CREATE TABLE IF NOT EXISTS evetools_catalog.market_order_snapshots (
+        sync_run_id BIGINT NOT NULL REFERENCES evetools_catalog.market_sync_runs(sync_run_id) ON DELETE CASCADE,
+        region_id INTEGER NOT NULL,
+        station_id BIGINT NOT NULL,
+        type_id INTEGER NOT NULL,
+        order_id BIGINT NOT NULL,
+        is_buy_order BOOLEAN NOT NULL,
+        price DOUBLE PRECISION NOT NULL,
+        volume_remain BIGINT NOT NULL,
+        volume_total BIGINT NOT NULL,
+        issued TEXT NOT NULL,
+        duration INTEGER NOT NULL,
+        min_volume INTEGER NOT NULL,
+        order_range TEXT NOT NULL,
+        system_id INTEGER NOT NULL,
+        PRIMARY KEY (sync_run_id, order_id)
+    )"#,
     r#"DO $$
     BEGIN
         ALTER TABLE evetools_catalog.inventory_groups
@@ -176,6 +221,10 @@ const CATALOG_SCHEMA_STATEMENTS: &[&str] = &[
         ON evetools_catalog.inventory_category_localizations(language, name)"#,
     r#"CREATE INDEX IF NOT EXISTS idx_evetools_market_group_localizations_language_name
         ON evetools_catalog.market_group_localizations(language, name)"#,
+    r#"CREATE INDEX IF NOT EXISTS idx_evetools_market_sync_runs_region_status_completed
+        ON evetools_catalog.market_sync_runs(region_id, status, completed_at DESC)"#,
+    r#"CREATE INDEX IF NOT EXISTS idx_evetools_market_orders_station_type
+        ON evetools_catalog.market_order_snapshots(region_id, station_id, type_id)"#,
 ];
 
 #[cfg(test)]
@@ -234,6 +283,25 @@ mod tests {
         assert_schema_contains("PRIMARY KEY (category_id, language)");
         assert_schema_contains("PRIMARY KEY (market_group_id, language)");
         assert_schema_contains("idx_evetools_inventory_type_localizations_language_name");
+    }
+
+    #[test]
+    fn creates_public_market_sync_tables_and_indexes() {
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.trade_hubs");
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.market_sync_runs");
+        assert_schema_contains(
+            "CREATE TABLE IF NOT EXISTS evetools_catalog.market_order_snapshots",
+        );
+        assert_schema_contains("PRIMARY KEY (hub_id)");
+        assert_schema_contains("PRIMARY KEY (sync_run_id, order_id)");
+        assert_schema_contains("idx_evetools_market_orders_station_type");
+        assert_schema_contains("idx_evetools_market_sync_runs_region_status_completed");
+    }
+
+    #[test]
+    fn connection_session_setup_bounds_lock_and_statement_waits() {
+        assert!(CATALOG_SESSION_SETUP_SQL.contains("lock_timeout"));
+        assert!(CATALOG_SESSION_SETUP_SQL.contains("statement_timeout"));
     }
 
     fn statement_index(needle: &str) -> usize {

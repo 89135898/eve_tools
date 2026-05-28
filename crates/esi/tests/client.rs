@@ -87,6 +87,44 @@ async fn fetches_all_market_order_pages() {
 }
 
 #[tokio::test]
+async fn fetches_region_market_order_pages_without_type_filter() {
+    let server = MockServer::start();
+    let page_one = server.mock(|when, then| {
+        when.method(GET)
+            .path("/latest/markets/10000002/orders/")
+            .query_param("datasource", "tranquility")
+            .query_param("order_type", "all")
+            .query_param("page", "1");
+        then.status(200)
+            .header("content-type", "application/json")
+            .header("X-Pages", "2")
+            .body(include_str!("fixtures/market_orders.json"));
+    });
+    let page_two = server.mock(|when, then| {
+        when.method(GET)
+            .path("/latest/markets/10000002/orders/")
+            .query_param("datasource", "tranquility")
+            .query_param("order_type", "all")
+            .query_param("page", "2");
+        then.status(200)
+            .header("content-type", "application/json")
+            .header("X-Pages", "2")
+            .body("[]");
+    });
+
+    let client = EsiClient::new(server.base_url());
+    let orders = client
+        .region_market_orders(10000002, EsiOrderType::All)
+        .await
+        .unwrap();
+
+    page_one.assert();
+    page_two.assert();
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].type_id, 34);
+}
+
+#[tokio::test]
 async fn fetches_market_history() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {

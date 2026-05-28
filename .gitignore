@@ -1,4 +1,5 @@
 .worktrees/
+.cache/
 target/
 apps/desktop/src-tauri/gen/
 node_modules/

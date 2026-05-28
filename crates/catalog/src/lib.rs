@@ -4,12 +4,16 @@ use evetools_db::{
 };
 pub use evetools_db::{CatalogImportTable, CatalogStatus, InventoryTypeView};
 use evetools_sde::{read_catalog_archive_from_bytes, SdeClient};
-use std::fmt;
+use std::{
+    fmt, fs, io,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use url::Url;
 
 const OFFICIAL_SDE_ARCHIVE_URL: &str =
     "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
+const SDE_ARCHIVE_CACHE_DIR_ENV: &str = "EVETOOLS_SDE_CACHE_DIR";
 const MIN_COMPLETE_OFFICIAL_TYPE_COUNT: i64 = 10_000;
 const MIN_COMPLETE_OFFICIAL_GROUP_COUNT: i64 = 500;
 const MIN_COMPLETE_OFFICIAL_CATEGORY_COUNT: i64 = 20;
@@ -57,6 +61,8 @@ pub enum CatalogServiceError {
     SdeClient(#[from] evetools_sde::SdeClientError),
     #[error("SDE archive error: {0}")]
     SdeArchive(#[from] evetools_sde::SdeArchiveError),
+    #[error("SDE archive cache error: {0}")]
+    SdeArchiveCache(#[from] std::io::Error),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +80,10 @@ pub enum CatalogImportProgress {
     DownloadedArchive {
         byte_count: usize,
     },
+    UsingCachedArchive {
+        path: String,
+        byte_count: usize,
+    },
     ParsingArchive,
     ParsedArchive {
         type_count: usize,
@@ -85,6 +95,28 @@ pub enum CatalogImportProgress {
     WritingTableStarted {
         table: CatalogImportTable,
         total: usize,
+    },
+    WritingBatchStarted {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        attempt: usize,
+    },
+    WritingBatchMerging {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        attempt: usize,
+    },
+    WritingBatchRetrying {
+        table: CatalogImportTable,
+        completed: usize,
+        total: usize,
+        batch_size: usize,
+        next_attempt: usize,
+        error_summary: String,
     },
     WritingRows {
         table: CatalogImportTable,
@@ -174,13 +206,27 @@ impl CatalogService {
             return Ok(current_status);
         }
 
-        progress(CatalogImportProgress::DownloadingArchive {
-            url: OFFICIAL_SDE_ARCHIVE_URL.to_string(),
-        });
-        let bytes = client.download_latest_archive().await?;
-        progress(CatalogImportProgress::DownloadedArchive {
-            byte_count: bytes.len(),
-        });
+        let cache = SdeArchiveCache::for_build(latest_metadata.build_number);
+        let bytes = match cache.read_existing()? {
+            Some(bytes) => {
+                progress(CatalogImportProgress::UsingCachedArchive {
+                    path: cache.path().display().to_string(),
+                    byte_count: bytes.len(),
+                });
+                bytes
+            }
+            None => {
+                progress(CatalogImportProgress::DownloadingArchive {
+                    url: OFFICIAL_SDE_ARCHIVE_URL.to_string(),
+                });
+                let bytes = client.download_latest_archive().await?;
+                cache.write(&bytes)?;
+                progress(CatalogImportProgress::DownloadedArchive {
+                    byte_count: bytes.len(),
+                });
+                bytes
+            }
+        };
         progress(CatalogImportProgress::ParsingArchive);
         let archive = read_catalog_archive_from_bytes(bytes)?;
         progress(CatalogImportProgress::ParsedArchive {
@@ -190,7 +236,7 @@ impl CatalogService {
             market_group_count: archive.market_groups.len(),
         });
         progress(CatalogImportProgress::WritingCatalog);
-        Ok(self
+        let status = self
             .repository
             .import_archive_with_progress(
                 ImportCatalogInput {
@@ -200,6 +246,53 @@ impl CatalogService {
                 |event| match event {
                     DbCatalogImportProgress::TableStarted { table, total } => {
                         progress(CatalogImportProgress::WritingTableStarted { table, total });
+                    }
+                    DbCatalogImportProgress::BatchStarted {
+                        table,
+                        completed,
+                        total,
+                        batch_size,
+                        attempt,
+                    } => {
+                        progress(CatalogImportProgress::WritingBatchStarted {
+                            table,
+                            completed,
+                            total,
+                            batch_size,
+                            attempt,
+                        });
+                    }
+                    DbCatalogImportProgress::BatchMerging {
+                        table,
+                        completed,
+                        total,
+                        batch_size,
+                        attempt,
+                    } => {
+                        progress(CatalogImportProgress::WritingBatchMerging {
+                            table,
+                            completed,
+                            total,
+                            batch_size,
+                            attempt,
+                        });
+                    }
+                    DbCatalogImportProgress::BatchRetrying {
+                        table,
+                        completed,
+                        total,
+                        batch_size,
+                        next_attempt,
+                        error_summary,
+                    } => {
+                        progress(CatalogImportProgress::WritingBatchRetrying {
+                            table,
+                            completed,
+                            total,
+                            batch_size,
+                            next_attempt,
+                            error_summary,
+                        });
                     }
                     DbCatalogImportProgress::TableAdvanced {
                         table,
@@ -217,13 +310,12 @@ impl CatalogService {
                     }
                 },
             )
-            .await
-            .map(|status| {
-                progress(CatalogImportProgress::Completed {
-                    status: status.clone(),
-                });
-                status
-            })?)
+            .await?;
+        cache.delete_after_success()?;
+        progress(CatalogImportProgress::Completed {
+            status: status.clone(),
+        });
+        Ok(status)
     }
 
     pub async fn search_inventory_types(
@@ -263,6 +355,67 @@ fn should_skip_latest_import(
         && status.group_count >= MIN_COMPLETE_OFFICIAL_GROUP_COUNT
         && status.category_count >= MIN_COMPLETE_OFFICIAL_CATEGORY_COUNT
         && status.market_group_count >= MIN_COMPLETE_OFFICIAL_MARKET_GROUP_COUNT
+}
+
+struct SdeArchiveCache {
+    path: PathBuf,
+}
+
+impl SdeArchiveCache {
+    fn for_build(build_number: i32) -> Self {
+        let root = std::env::var_os(SDE_ARCHIVE_CACHE_DIR_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(default_sde_archive_cache_dir);
+        Self::new(root, build_number)
+    }
+
+    fn new(root: impl AsRef<Path>, build_number: i32) -> Self {
+        Self {
+            path: root
+                .as_ref()
+                .join(format!("eve-online-static-data-{build_number}-jsonl.zip")),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn read_existing(&self) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(&self.path) {
+            Ok(bytes) if bytes.is_empty() => {
+                fs::remove_file(&self.path)?;
+                Ok(None)
+            }
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary_path = self
+            .path
+            .with_extension(format!("zip.part-{}", std::process::id()));
+        fs::write(&temporary_path, bytes)?;
+        fs::rename(temporary_path, &self.path)?;
+        Ok(())
+    }
+
+    fn delete_after_success(&self) -> io::Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn default_sde_archive_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("evetools").join("sde")
 }
 
 #[cfg(test)]
@@ -321,5 +474,38 @@ mod tests {
         };
 
         assert!(!should_skip_latest_import(&status, 3_351_823, false));
+    }
+
+    #[test]
+    fn sde_archive_cache_uses_versioned_build_file_names() {
+        let root = std::path::Path::new("/tmp/evetools-test-cache");
+        let cache = SdeArchiveCache::new(root, 3_351_823);
+
+        assert_eq!(
+            cache.path(),
+            root.join("eve-online-static-data-3351823-jsonl.zip")
+        );
+    }
+
+    #[test]
+    fn successful_import_cleanup_removes_cached_archive() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache = SdeArchiveCache::new(temp_dir.path(), 3_351_823);
+        std::fs::create_dir_all(temp_dir.path()).unwrap();
+        std::fs::write(cache.path(), b"cached-sde").unwrap();
+
+        cache.delete_after_success().unwrap();
+
+        assert!(!cache.path().exists());
+    }
+
+    #[test]
+    fn archive_cache_reads_previous_failed_download() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache = SdeArchiveCache::new(temp_dir.path(), 3_351_823);
+
+        cache.write(b"cached-sde").unwrap();
+
+        assert_eq!(cache.read_existing().unwrap(), Some(b"cached-sde".to_vec()));
     }
 }
