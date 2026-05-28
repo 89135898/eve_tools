@@ -9,9 +9,10 @@ rust-version.workspace = true
 evetools-db = { path = "../db" }
 evetools-esi = { path = "../esi" }
 serde.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 evetools-test-support = { path = "../test-support" }
 httpmock = "0.8.3"
-tokio.workspace = true

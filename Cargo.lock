@@ -1139,6 +1139,7 @@ dependencies = [
  "evetools-test-support",
  "httpmock",
  "serde",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
 ]

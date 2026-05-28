@@ -1,12 +1,157 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+const DEFAULT_PUBLIC_MARKET_REGION_ID: i32 = 10000002;
+const DATABASE_URL_ENV: &str = "EVETOOLS_DATABASE_URL";
+const ESI_BASE_URL_ENV: &str = "EVETOOLS_ESI_BASE_URL";
+
 #[derive(Debug, thiserror::Error)]
 pub enum PublicMarketSyncError {
     #[error("market database error: {0}")]
     MarketDb(#[from] evetools_db::MarketDbError),
     #[error("public ESI error: {0}")]
     Esi(#[from] evetools_esi::EsiError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PublicMarketSyncCliError {
+    #[error("EVETOOLS_DATABASE_URL is required")]
+    MissingDatabaseUrl,
+    #[error("invalid region id {value:?}")]
+    InvalidRegionId { value: String },
+    #[error("unexpected argument {value:?}")]
+    UnexpectedArgument { value: String },
+    #[error("sql connection error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+    #[error("sql migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("public market sync error: {0}")]
+    Sync(#[from] PublicMarketSyncError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicMarketSyncCliConfig {
+    pub database_url: String,
+    pub esi_base_url: Option<String>,
+    pub region_id: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicMarketSyncSummary {
+    pub sync_run_id: i64,
+    pub region_id: i32,
+}
+
+impl PublicMarketSyncCliConfig {
+    pub fn from_env_and_args<I, S>(args: I) -> Result<Self, PublicMarketSyncCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::from_args_and_env(args, |name| std::env::var(name).ok())
+    }
+
+    pub fn from_args_and_env<I, S, F>(args: I, mut env: F) -> Result<Self, PublicMarketSyncCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        F: FnMut(&str) -> Option<String>,
+    {
+        let database_url = env(DATABASE_URL_ENV)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or(PublicMarketSyncCliError::MissingDatabaseUrl)?;
+        let esi_base_url = env(ESI_BASE_URL_ENV)
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        let region_id = parse_region_id_arg(args)?;
+
+        Ok(Self {
+            database_url,
+            esi_base_url,
+            region_id,
+        })
+    }
+}
+
+pub async fn run_public_market_region_sync(
+    config: PublicMarketSyncCliConfig,
+) -> Result<PublicMarketSyncSummary, PublicMarketSyncCliError> {
+    let pool = evetools_db::connect_pool(&config.database_url).await?;
+    evetools_db::migrate_catalog_schema(&pool).await?;
+    let repository = evetools_db::MarketRepository::new(pool);
+    let client = config
+        .esi_base_url
+        .map(evetools_esi::EsiClient::new)
+        .unwrap_or_else(evetools_esi::EsiClient::tranquility);
+    let sync_run_id = sync_public_market_region_orders(
+        &repository,
+        &client,
+        config.region_id,
+        &default_trade_hubs(),
+    )
+    .await?;
+
+    Ok(PublicMarketSyncSummary {
+        sync_run_id,
+        region_id: config.region_id,
+    })
+}
+
+pub fn format_public_market_sync_summary(summary: &PublicMarketSyncSummary) -> String {
+    format!(
+        "synced public market region {} with sync_run_id {}",
+        summary.region_id, summary.sync_run_id
+    )
+}
+
+fn parse_region_id_arg<I, S>(args: I) -> Result<i32, PublicMarketSyncCliError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut region_id = None;
+    let mut args = args.into_iter().map(Into::into);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--region-id" => {
+                let Some(value) = args.next() else {
+                    return Err(PublicMarketSyncCliError::InvalidRegionId {
+                        value: String::new(),
+                    });
+                };
+                region_id = Some(parse_region_id(&value)?);
+            }
+            value if value.starts_with("--region-id=") => {
+                let value = value.trim_start_matches("--region-id=");
+                region_id = Some(parse_region_id(value)?);
+            }
+            value if value.starts_with('-') => {
+                return Err(PublicMarketSyncCliError::UnexpectedArgument {
+                    value: value.to_string(),
+                });
+            }
+            value => {
+                if region_id.is_some() {
+                    return Err(PublicMarketSyncCliError::UnexpectedArgument {
+                        value: value.to_string(),
+                    });
+                }
+                region_id = Some(parse_region_id(value)?);
+            }
+        }
+    }
+
+    Ok(region_id.unwrap_or(DEFAULT_PUBLIC_MARKET_REGION_ID))
+}
+
+fn parse_region_id(value: &str) -> Result<i32, PublicMarketSyncCliError> {
+    value
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| PublicMarketSyncCliError::InvalidRegionId {
+            value: value.to_string(),
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +350,62 @@ mod tests {
         let fallback = fixture_fallback_sync_status();
         assert_eq!(fallback.public_market_sync, "fixture-fallback");
         assert_eq!(fallback.data_source, "fixture");
+    }
+
+    #[test]
+    fn cli_config_defaults_to_the_forge_and_requires_database_url() {
+        let missing = PublicMarketSyncCliConfig::from_args_and_env(Vec::<String>::new(), |_| None)
+            .unwrap_err();
+        assert_eq!(missing.to_string(), "EVETOOLS_DATABASE_URL is required");
+
+        let config = PublicMarketSyncCliConfig::from_args_and_env(Vec::<String>::new(), |name| {
+            (name == DATABASE_URL_ENV).then(|| "postgresql://localhost/test".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(config.region_id, 10000002);
+        assert_eq!(config.database_url, "postgresql://localhost/test");
+        assert_eq!(config.esi_base_url, None);
+    }
+
+    #[test]
+    fn cli_config_accepts_region_arg_and_custom_esi_base_url() {
+        let config =
+            PublicMarketSyncCliConfig::from_args_and_env(["--region-id", "10000043"], |name| {
+                match name {
+                    DATABASE_URL_ENV => Some("postgresql://localhost/test".to_string()),
+                    ESI_BASE_URL_ENV => Some("http://127.0.0.1:1234/".to_string()),
+                    _ => None,
+                }
+            })
+            .unwrap();
+
+        assert_eq!(config.region_id, 10000043);
+        assert_eq!(
+            config.esi_base_url,
+            Some("http://127.0.0.1:1234".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_config_rejects_invalid_region_args() {
+        let error = PublicMarketSyncCliConfig::from_args_and_env(["abc"], |name| {
+            (name == DATABASE_URL_ENV).then(|| "postgresql://localhost/test".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "invalid region id \"abc\"");
+    }
+
+    #[test]
+    fn formats_public_market_sync_summary_for_cli_output() {
+        assert_eq!(
+            format_public_market_sync_summary(&PublicMarketSyncSummary {
+                sync_run_id: 42,
+                region_id: 10000002
+            }),
+            "synced public market region 10000002 with sync_run_id 42"
+        );
     }
 
     #[test]

@@ -112,6 +112,23 @@ EVETOOLS_MARKET_SOURCE=fixture pnpm dev
 
 认证角色订单监控在 SSO 阶段前仍由 fixture 驱动。
 
+### 同步区域市场订单
+
+可以用 worker CLI 手动同步某个 region 的公开市场订单。第一版会拉取 region 级公开订单，然后只保留已配置 trade hub station 的订单快照。
+
+```bash
+export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
+cargo run -p evetools-worker --bin sync-public-market-region -- --region-id 10000002
+```
+
+不传 region 时默认同步 The Forge：
+
+```bash
+cargo run -p evetools-worker --bin sync-public-market-region
+```
+
+CLI 会运行数据库 migrations、写入/更新默认 trade hubs、创建 `market_sync_runs`，并把过滤后的订单写入 `market_order_snapshots`。成功后会输出本次 `sync_run_id`。`EVETOOLS_ESI_BASE_URL` 仅用于本地测试或 mock ESI，不需要在正常使用时设置。
+
 ## 只读查询 API
 
 `crates/api` 提供第一版只读应用层 API。它不是 HTTP server，也不直接同步 ESI 数据；它封装 repository 查询，作为 Tauri commands 和未来 hosted API 之间的稳定边界。
