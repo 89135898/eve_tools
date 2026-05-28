@@ -1,7 +1,8 @@
 use chrono::Utc;
-use evetools_api::{EveToolsReadApi, SelectionCandidatesRequest, TradeHubView};
-use evetools_catalog::{CatalogConfig, CatalogService};
-use evetools_db::{CatalogStatus, InventoryTypeView};
+use evetools_api::{
+    CatalogStatusView as CatalogStatus, InventoryTypeApiView as InventoryTypeView,
+    SelectionCandidatesRequest, TradeHubView,
+};
 use evetools_domain::fixtures::{
     fixture_market_lookup, fixture_order_monitor, fixture_selection_candidates,
 };
@@ -16,11 +17,13 @@ use evetools_worker::{
 };
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use serde::{de::DeserializeOwned, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 const DEFAULT_SELECTION_LIMIT: i64 = 25;
+const API_BASE_URL_ENV: &str = "EVETOOLS_API_BASE_URL";
 
 static PUBLIC_MARKET_USED_FALLBACK: AtomicBool = AtomicBool::new(false);
 
@@ -224,88 +227,185 @@ async fn list_trade_hubs(
     }
 
     match state.get().await {
-        Ok(api) => api
+        Ok(source) => source
             .list_trade_hubs()
             .await
-            .map_err(|error| error.to_string())
             .or_else(|_| Ok(default_trade_hubs_as_db_records())),
         Err(_) => Ok(default_trade_hubs_as_db_records()),
     }
 }
 
 #[derive(Default)]
-struct CatalogServiceState {
-    service: OnceCell<Arc<CatalogService>>,
-}
-
-impl CatalogServiceState {
-    async fn get(&self) -> Result<Arc<CatalogService>, String> {
-        self.service
-            .get_or_try_init(|| async {
-                let config = CatalogConfig::from_env().map_err(|error| error.to_string())?;
-                CatalogService::connect(config)
-                    .await
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map(Arc::clone)
-    }
-}
-
-#[derive(Default)]
 struct ReadApiState {
-    api: OnceCell<Arc<EveToolsReadApi>>,
+    source: OnceCell<Arc<HostedReadApiClient>>,
 }
 
 impl ReadApiState {
-    async fn get(&self) -> Result<Arc<EveToolsReadApi>, String> {
-        self.api
+    async fn get(&self) -> Result<Arc<HostedReadApiClient>, String> {
+        self.source
             .get_or_try_init(|| async {
-                let database_url = std::env::var("EVETOOLS_DATABASE_URL")
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                if database_url.is_empty() {
-                    return Err("EVETOOLS_DATABASE_URL is required".to_string());
-                }
-                EveToolsReadApi::connect(&database_url)
-                    .await
-                    .map(Arc::new)
-                    .map_err(|error| error.to_string())
+                Ok(Arc::new(HostedReadApiClient::new(
+                    ReadApiSourceConfig::from_env()?.base_url,
+                )))
             })
             .await
             .map(Arc::clone)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReadApiSourceConfig {
+    base_url: String,
+}
+
+impl ReadApiSourceConfig {
+    fn from_env() -> Result<Self, String> {
+        Self::from_env_reader(|name| std::env::var(name).ok())
+    }
+
+    fn from_env_reader<F>(mut env: F) -> Result<Self, String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        if let Some(base_url) = env(API_BASE_URL_ENV)
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Self { base_url });
+        }
+
+        Err("EVETOOLS_API_BASE_URL is required".to_string())
+    }
+}
+
+#[derive(Clone)]
+struct HostedReadApiClient {
+    base_url: String,
+    http: reqwest::Client,
+}
+
+impl HostedReadApiClient {
+    fn new(base_url: String) -> Self {
+        Self {
+            base_url,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn catalog_status(&self) -> Result<CatalogStatus, String> {
+        self.get_json("/catalog/status", &NoQuery).await
+    }
+
+    async fn get_inventory_type(
+        &self,
+        type_id: i32,
+        language: &str,
+    ) -> Result<Option<InventoryTypeView>, String> {
+        self.get_json(
+            &format!("/inventory-types/{type_id}"),
+            &LanguageHttpQuery { language },
+        )
+        .await
+    }
+
+    async fn search_inventory_types(
+        &self,
+        query: &str,
+        language: &str,
+        limit: i64,
+    ) -> Result<Vec<InventoryTypeView>, String> {
+        self.get_json(
+            "/inventory-types/search",
+            &InventoryTypeSearchHttpQuery {
+                query,
+                language,
+                limit,
+            },
+        )
+        .await
+    }
+
+    async fn list_trade_hubs(&self) -> Result<Vec<TradeHubView>, String> {
+        self.get_json("/trade-hubs", &NoQuery).await
+    }
+
+    async fn selection_candidates(
+        &self,
+        request: SelectionCandidatesRequest,
+    ) -> Result<Vec<SelectionCandidateView>, String> {
+        let hub_ids = request.hub_ids.join(",");
+        self.get_json(
+            "/selection-candidates",
+            &SelectionCandidatesHttpQuery {
+                hub_ids: &hub_ids,
+                language: &request.language,
+                limit_per_hub: request.limit_per_hub,
+            },
+        )
+        .await
+    }
+
+    async fn get_json<T, Q>(&self, path: &str, query: &Q) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+        Q: Serialize + ?Sized,
+    {
+        self.http
+            .get(format!("{}{}", self.base_url, path))
+            .query(query)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?
+            .json::<T>()
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Serialize)]
+struct NoQuery;
+
+#[derive(Serialize)]
+struct LanguageHttpQuery<'a> {
+    language: &'a str,
+}
+
+#[derive(Serialize)]
+struct InventoryTypeSearchHttpQuery<'a> {
+    query: &'a str,
+    language: &'a str,
+    limit: i64,
+}
+
+#[derive(Serialize)]
+struct SelectionCandidatesHttpQuery<'a> {
+    hub_ids: &'a str,
+    language: &'a str,
+    limit_per_hub: i64,
 }
 
 #[tauri::command]
 async fn get_sde_catalog_status(
-    state: tauri::State<'_, CatalogServiceState>,
+    state: tauri::State<'_, ReadApiState>,
 ) -> Result<CatalogStatus, String> {
-    state
-        .get()
-        .await?
-        .status()
-        .await
-        .map_err(|error| error.to_string())
+    state.get().await?.catalog_status().await
 }
 
 #[tauri::command]
 async fn import_sde_catalog_latest(
-    state: tauri::State<'_, CatalogServiceState>,
+    _state: tauri::State<'_, ReadApiState>,
 ) -> Result<CatalogStatus, String> {
-    state
-        .get()
-        .await?
-        .import_latest()
-        .await
-        .map_err(|error| error.to_string())
+    Err(
+        "SDE catalog import is an admin operation; run import-sde-latest or a hosted job instead"
+            .to_string(),
+    )
 }
 
 #[tauri::command]
 async fn search_inventory_types(
-    state: tauri::State<'_, CatalogServiceState>,
+    state: tauri::State<'_, ReadApiState>,
     query: String,
     language: String,
     limit: i64,
@@ -315,12 +415,11 @@ async fn search_inventory_types(
         .await?
         .search_inventory_types(&query, &language, limit)
         .await
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn get_inventory_type(
-    state: tauri::State<'_, CatalogServiceState>,
+    state: tauri::State<'_, ReadApiState>,
     type_id: i32,
     language: String,
 ) -> Result<Option<InventoryTypeView>, String> {
@@ -329,12 +428,10 @@ async fn get_inventory_type(
         .await?
         .get_inventory_type(type_id, &language)
         .await
-        .map_err(|error| error.to_string())
 }
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(CatalogServiceState::default())
         .manage(ReadApiState::default())
         .invoke_handler(tauri::generate_handler![
             lookup_market_price,
@@ -424,17 +521,26 @@ mod tests {
         mark_public_market_fallback(false);
     }
 
-    #[tokio::test]
-    async fn catalog_service_state_reports_missing_database_url() {
-        std::env::remove_var("EVETOOLS_DATABASE_URL");
+    #[test]
+    fn read_api_config_uses_hosted_api_base_url() {
+        let config = ReadApiSourceConfig::from_env_reader(|name| match name {
+            "EVETOOLS_API_BASE_URL" => Some(" http://127.0.0.1:8080/ ".to_string()),
+            _ => None,
+        })
+        .unwrap();
 
-        let state = CatalogServiceState::default();
-        let error = match state.get().await {
-            Ok(_) => panic!("expected missing database url error"),
-            Err(error) => error,
-        };
+        assert_eq!(
+            config,
+            ReadApiSourceConfig {
+                base_url: "http://127.0.0.1:8080".to_string()
+            }
+        );
+    }
 
-        assert_eq!(error, "EVETOOLS_DATABASE_URL is required");
-        assert!(state.service.get().is_none());
+    #[test]
+    fn read_api_config_requires_hosted_api_base_url() {
+        let error = ReadApiSourceConfig::from_env_reader(|_| None).unwrap_err();
+
+        assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
     }
 }

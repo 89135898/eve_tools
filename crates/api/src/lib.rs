@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 
-pub use evetools_db::{MarketOrderSnapshot as MarketOrderView, TradeHub as TradeHubView};
+pub use evetools_db::{
+    CatalogStatus as CatalogStatusView, InventoryTypeView as InventoryTypeApiView,
+    MarketOrderSnapshot as MarketOrderView, TradeHub as TradeHubView,
+};
 
 const MAX_SELECTION_CANDIDATE_LIMIT: usize = 100;
 

@@ -14,12 +14,11 @@ tauri-build.workspace = true
 
 [dependencies]
 chrono.workspace = true
-evetools-catalog = { path = "../../../crates/catalog" }
 evetools-api = { path = "../../../crates/api" }
-evetools-db = { path = "../../../crates/db" }
 evetools-domain = { path = "../../../crates/domain" }
 evetools-esi = { path = "../../../crates/esi" }
 evetools-worker = { path = "../../../crates/worker" }
+reqwest.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

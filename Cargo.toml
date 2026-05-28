@@ -8,6 +8,7 @@ members = [
   "crates/catalog",
   "crates/worker",
   "crates/api",
+  "crates/http-api",
   "crates/test-support",
   "apps/desktop/src-tauri"
 ]
@@ -20,8 +21,9 @@ rust-version = "1.82"
 
 [workspace.dependencies]
 anyhow = "1"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rust_decimal = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,6 +32,6 @@ tauri = { version = "2" }
 tauri-build = { version = "2" }
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 url = "2"
 zip = { version = "5", default-features = false, features = ["deflate"] }
