@@ -1032,8 +1032,10 @@ name = "evetools-api"
 version = "0.1.0"
 dependencies = [
  "evetools-db",
+ "evetools-domain",
  "evetools-sde",
  "evetools-test-support",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sqlx",
@@ -1073,6 +1075,7 @@ name = "evetools-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "evetools-api",
  "evetools-catalog",
  "evetools-db",
  "evetools-domain",

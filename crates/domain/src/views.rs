@@ -20,6 +20,10 @@ pub struct MarketLookupView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionCandidateView {
+    pub hub_id: String,
+    pub hub_name: String,
+    pub region_id: i32,
+    pub station_id: i64,
     pub type_id: i32,
     pub item_name: String,
     pub recommended_entry_price: String,
@@ -29,6 +33,7 @@ pub struct SelectionCandidateView {
     pub liquidity_score: u8,
     pub confidence_score: u8,
     pub reason_codes: Vec<String>,
+    pub last_synced_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +85,27 @@ impl MarketLookupView {
 
 impl SelectionCandidateView {
     pub fn from_analysis(analysis: crate::CandidateAnalysis) -> Self {
+        Self::from_analysis_for_hub(
+            analysis,
+            SelectionCandidateHubView {
+                hub_id: "jita".to_string(),
+                hub_name: "Jita".to_string(),
+                region_id: crate::THE_FORGE_REGION_ID,
+                station_id: crate::JITA_4_4_STATION_ID,
+                last_synced_at: String::new(),
+            },
+        )
+    }
+
+    pub fn from_analysis_for_hub(
+        analysis: crate::CandidateAnalysis,
+        hub: SelectionCandidateHubView,
+    ) -> Self {
         Self {
+            hub_id: hub.hub_id,
+            hub_name: hub.hub_name,
+            region_id: hub.region_id,
+            station_id: hub.station_id,
             type_id: analysis.type_id,
             item_name: analysis.item_name,
             recommended_entry_price: format_isk(analysis.recommended_entry_price),
@@ -90,8 +115,18 @@ impl SelectionCandidateView {
             liquidity_score: analysis.liquidity_score,
             confidence_score: analysis.confidence_score,
             reason_codes: analysis.reason_codes,
+            last_synced_at: hub.last_synced_at,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionCandidateHubView {
+    pub hub_id: String,
+    pub hub_name: String,
+    pub region_id: i32,
+    pub station_id: i64,
+    pub last_synced_at: String,
 }
 
 #[cfg(test)]
@@ -139,6 +174,10 @@ mod tests {
 
         let view = SelectionCandidateView::from_analysis(analysis);
 
+        assert_eq!(view.hub_id, "jita");
+        assert_eq!(view.hub_name, "Jita");
+        assert_eq!(view.region_id, crate::THE_FORGE_REGION_ID);
+        assert_eq!(view.station_id, crate::JITA_4_4_STATION_ID);
         assert_eq!(view.recommended_entry_price, "5.02");
         assert_eq!(view.recommended_exit_price, "5.48");
         assert_eq!(view.net_profit, "0.20");

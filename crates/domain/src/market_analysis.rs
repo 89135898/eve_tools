@@ -44,18 +44,36 @@ pub fn summarize_jita_market(
     history: &[PublicMarketHistoryDay],
     last_synced_at: impl Into<String>,
 ) -> OrderBookSummary {
-    let jita_orders = orders
-        .iter()
-        .filter(|order| order.location_id == JITA_4_4_STATION_ID && order.type_id == type_id);
+    summarize_station_market(
+        JITA_4_4_STATION_ID,
+        type_id,
+        item_name,
+        orders,
+        history,
+        last_synced_at,
+    )
+}
 
-    let best_bid = jita_orders
+pub fn summarize_station_market(
+    station_id: i64,
+    type_id: i32,
+    item_name: impl Into<String>,
+    orders: &[PublicMarketOrder],
+    history: &[PublicMarketHistoryDay],
+    last_synced_at: impl Into<String>,
+) -> OrderBookSummary {
+    let station_orders = orders
+        .iter()
+        .filter(|order| order.location_id == station_id && order.type_id == type_id);
+
+    let best_bid = station_orders
         .clone()
         .filter(|order| order.is_buy_order)
         .map(|order| order.price)
         .max()
         .unwrap_or(Decimal::ZERO);
 
-    let best_ask = jita_orders
+    let best_ask = station_orders
         .clone()
         .filter(|order| !order.is_buy_order)
         .map(|order| order.price)
@@ -63,7 +81,7 @@ pub fn summarize_jita_market(
         .unwrap_or(Decimal::ZERO);
 
     let top_buy_depth = if best_bid > Decimal::ZERO {
-        jita_orders
+        station_orders
             .clone()
             .filter(|order| order.is_buy_order && order.price == best_bid)
             .map(|order| order.volume_remain)
@@ -73,7 +91,7 @@ pub fn summarize_jita_market(
     };
 
     let top_sell_depth = if best_ask > Decimal::ZERO {
-        jita_orders
+        station_orders
             .clone()
             .filter(|order| !order.is_buy_order && order.price == best_ask)
             .map(|order| order.volume_remain)
@@ -302,6 +320,33 @@ mod tests {
         assert_eq!(summary.top_sell_depth, 650_000);
         assert_eq!(summary.daily_volume, 1_250_000);
         assert_eq!(classify_price_trend(&history), PriceTrend::Up);
+    }
+
+    #[test]
+    fn summarizes_configured_station_top_of_book() {
+        let station_id = 60008494;
+        let orders = vec![
+            order(34, true, Decimal::new(501, 2), 500_000, JITA_4_4_STATION_ID),
+            order(34, true, Decimal::new(640, 2), 80_000, station_id),
+            order(34, true, Decimal::new(640, 2), 20_000, station_id),
+            order(34, false, Decimal::new(705, 2), 70_000, station_id),
+            order(34, false, Decimal::new(710, 2), 90_000, station_id),
+            order(35, true, Decimal::new(700, 2), 999_000, station_id),
+        ];
+
+        let summary = summarize_station_market(
+            station_id,
+            34,
+            "Tritanium",
+            &orders,
+            &[],
+            "2026-05-25T12:00:00Z",
+        );
+
+        assert_eq!(summary.best_bid, Decimal::new(640, 2));
+        assert_eq!(summary.best_ask, Decimal::new(705, 2));
+        assert_eq!(summary.top_buy_depth, 100_000);
+        assert_eq!(summary.top_sell_depth, 70_000);
     }
 
     #[test]

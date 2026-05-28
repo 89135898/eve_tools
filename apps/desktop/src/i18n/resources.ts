@@ -35,6 +35,8 @@ export const resources = {
       selection: {
         title: "选品发现",
         count: "{{count}} 个候选",
+        hub: "交易点",
+        allHubs: "全部交易点",
         item: "物品",
         entry: "入场价",
         exit: "出场价",
@@ -139,6 +141,8 @@ export const resources = {
       selection: {
         title: "Selection Discovery",
         count: "{{count}} candidates",
+        hub: "Hub",
+        allHubs: "All hubs",
         item: "Item",
         entry: "Entry",
         exit: "Exit",

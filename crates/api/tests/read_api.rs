@@ -1,5 +1,6 @@
 use evetools_api::{
-    EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest, StationOrdersRequest,
+    EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest,
+    SelectionCandidatesRequest, StationOrdersRequest,
 };
 use evetools_db::{
     connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput, MarketRepository,
@@ -55,8 +56,53 @@ async fn read_api_exposes_catalog_and_market_queries() {
         })
         .await
         .unwrap();
-    assert_eq!(orders.len(), 1);
+    assert_eq!(orders.len(), 2);
     assert_eq!(orders[0].type_id, 34);
+
+    let candidates = api
+        .selection_candidates(SelectionCandidatesRequest {
+            hub_ids: Vec::new(),
+            language: "zh-CN".to_string(),
+            limit_per_hub: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+
+    let jita = candidates
+        .iter()
+        .find(|candidate| candidate.hub_id == "jita")
+        .unwrap();
+    assert_eq!(jita.type_id, 34);
+    assert_eq!(jita.item_name, "三钛合金");
+    assert_eq!(jita.hub_name, "Jita");
+    assert_eq!(jita.region_id, 10000002);
+    assert_eq!(jita.station_id, 60003760);
+    assert!(!jita.last_synced_at.is_empty());
+    assert!(jita
+        .reason_codes
+        .iter()
+        .any(|code| code == "healthy_spread"));
+
+    let amarr = candidates
+        .iter()
+        .find(|candidate| candidate.hub_id == "amarr")
+        .unwrap();
+    assert_eq!(amarr.type_id, 34);
+    assert_eq!(amarr.hub_name, "Amarr");
+    assert_eq!(amarr.region_id, 10000043);
+    assert_eq!(amarr.station_id, 60008494);
+
+    let filtered = api
+        .selection_candidates(SelectionCandidatesRequest {
+            hub_ids: vec!["amarr".to_string()],
+            language: "zh-CN".to_string(),
+            limit_per_hub: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].hub_id, "amarr");
 }
 
 async fn prepare_seeded_api() -> Option<EveToolsReadApi> {
@@ -82,13 +128,38 @@ async fn prepare_seeded_api() -> Option<EveToolsReadApi> {
         .unwrap();
 
     let market = MarketRepository::new(pool.clone());
-    market.upsert_trade_hubs(&[jita_hub()]).await.unwrap();
-    let sync_run_id = market.start_sync_run(10000002, "test").await.unwrap();
     market
-        .replace_order_snapshots(sync_run_id, &[tritanium_order(sync_run_id)])
+        .upsert_trade_hubs(&[jita_hub(), amarr_hub()])
         .await
         .unwrap();
-    market.complete_sync_run(sync_run_id, 1, 1).await.unwrap();
+    let sync_run_id = market.start_sync_run(10000002, "test").await.unwrap();
+    market
+        .replace_order_snapshots(
+            sync_run_id,
+            &[
+                tritanium_buy_order(sync_run_id),
+                tritanium_sell_order(sync_run_id),
+            ],
+        )
+        .await
+        .unwrap();
+    market.complete_sync_run(sync_run_id, 1, 2).await.unwrap();
+
+    let amarr_sync_run_id = market.start_sync_run(10000043, "test").await.unwrap();
+    market
+        .replace_order_snapshots(
+            amarr_sync_run_id,
+            &[
+                amarr_tritanium_buy_order(amarr_sync_run_id),
+                amarr_tritanium_sell_order(amarr_sync_run_id),
+            ],
+        )
+        .await
+        .unwrap();
+    market
+        .complete_sync_run(amarr_sync_run_id, 1, 2)
+        .await
+        .unwrap();
 
     Some(EveToolsReadApi::from_pool(pool))
 }
@@ -189,7 +260,19 @@ fn jita_hub() -> TradeHub {
     }
 }
 
-fn tritanium_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
+fn amarr_hub() -> TradeHub {
+    TradeHub {
+        hub_id: "amarr".to_string(),
+        display_name: "Amarr".to_string(),
+        region_id: 10000043,
+        system_id: 30002187,
+        station_id: 60008494,
+        enabled: true,
+        sort_order: 20,
+    }
+}
+
+fn tritanium_buy_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
     evetools_db::MarketOrderSnapshotInput {
         sync_run_id,
         region_id: 10000002,
@@ -201,6 +284,63 @@ fn tritanium_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
         volume_remain: 500_000,
         volume_total: 1_000_000,
         issued: "2026-05-25T11:45:00Z".to_string(),
+        duration: 90,
+        min_volume: 1,
+        order_range: "station".to_string(),
+        system_id: 30000142,
+    }
+}
+
+fn amarr_tritanium_buy_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
+    evetools_db::MarketOrderSnapshotInput {
+        sync_run_id,
+        region_id: 10000043,
+        station_id: 60008494,
+        type_id: 34,
+        order_id: 7_100_000_001,
+        is_buy_order: true,
+        price: 5.25,
+        volume_remain: 300_000,
+        volume_total: 300_000,
+        issued: "2026-05-25T11:45:00Z".to_string(),
+        duration: 90,
+        min_volume: 1,
+        order_range: "station".to_string(),
+        system_id: 30002187,
+    }
+}
+
+fn amarr_tritanium_sell_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
+    evetools_db::MarketOrderSnapshotInput {
+        sync_run_id,
+        region_id: 10000043,
+        station_id: 60008494,
+        type_id: 34,
+        order_id: 7_100_000_002,
+        is_buy_order: false,
+        price: 5.99,
+        volume_remain: 400_000,
+        volume_total: 400_000,
+        issued: "2026-05-25T11:46:00Z".to_string(),
+        duration: 90,
+        min_volume: 1,
+        order_range: "station".to_string(),
+        system_id: 30002187,
+    }
+}
+
+fn tritanium_sell_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInput {
+    evetools_db::MarketOrderSnapshotInput {
+        sync_run_id,
+        region_id: 10000002,
+        station_id: 60003760,
+        type_id: 34,
+        order_id: 7_000_000_002,
+        is_buy_order: false,
+        price: 5.49,
+        volume_remain: 650_000,
+        volume_total: 650_000,
+        issued: "2026-05-25T11:46:00Z".to_string(),
         duration: 90,
         min_volume: 1,
         order_range: "station".to_string(),

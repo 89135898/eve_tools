@@ -7,7 +7,8 @@ pub use catalog::{
     ImportCatalogInput, InventoryTypeView,
 };
 pub use market::{
-    MarketDbError, MarketOrderSnapshot, MarketOrderSnapshotInput, MarketRepository, TradeHub,
+    MarketDbError, MarketOrderSnapshot, MarketOrderSnapshotInput, MarketRepository,
+    StationOrderBook, TradeHub,
 };
 pub use schema::{connect_pool, migrate_catalog_schema};
 

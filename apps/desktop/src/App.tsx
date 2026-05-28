@@ -4,11 +4,13 @@ import {
   getSyncStatus,
   listOrderMonitorItems,
   listSelectionCandidates,
+  listTradeHubs,
   lookupMarketPrice,
   type MarketLookupView,
   type OrderMonitorView,
   type SelectionCandidateView,
-  type SyncStatus
+  type SyncStatus,
+  type TradeHubView
 } from "./commands";
 import { supportedLanguages, translateCode, type SupportedLanguage } from "./i18n";
 
@@ -16,6 +18,7 @@ type LoadState = "idle" | "loading" | "ready" | "error";
 type RefreshResult = {
   lookup: MarketLookupView;
   candidates: SelectionCandidateView[];
+  hubs: TradeHubView[];
   orders: OrderMonitorView[];
   syncStatus: SyncStatus;
 };
@@ -33,26 +36,29 @@ function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus):
   return candidateStatus ?? lookupStatus;
 }
 
-async function runRefreshRequest(query: string): Promise<RefreshResult> {
+async function runRefreshRequest(query: string, language: string, selectedHubId: string): Promise<RefreshResult> {
   const lookupResult = await lookupMarketPrice(query);
   const lookupStatus = await getSyncStatus();
-  const candidateResult = await listSelectionCandidates();
+  const hubResult = await listTradeHubs();
+  const hubIds = selectedHubId === "all" ? [] : [selectedHubId];
+  const candidateResult = await listSelectionCandidates(language, hubIds);
   const candidateStatus = await getSyncStatus();
   const orderResult = await listOrderMonitorItems();
   const statusResult = mergeSyncStatus(lookupStatus, candidateStatus);
   return {
     lookup: lookupResult,
     candidates: candidateResult,
+    hubs: hubResult,
     orders: orderResult,
     syncStatus: statusResult
   };
 }
 
-function runSingleFlightRefresh(query: string): Promise<RefreshResult> {
+function runSingleFlightRefresh(query: string, language: string, selectedHubId: string): Promise<RefreshResult> {
   if (refreshRequestInFlight) {
     return refreshRequestInFlight;
   }
-  refreshRequestInFlight = runRefreshRequest(query).finally(() => {
+  refreshRequestInFlight = runRefreshRequest(query, language, selectedHubId).finally(() => {
     refreshRequestInFlight = null;
   });
   return refreshRequestInFlight;
@@ -63,6 +69,8 @@ export default function App() {
   const [query, setQuery] = useState("Tritanium");
   const [lookup, setLookup] = useState<MarketLookupView | null>(null);
   const [candidates, setCandidates] = useState<SelectionCandidateView[]>([]);
+  const [hubs, setHubs] = useState<TradeHubView[]>([]);
+  const [selectedHubId, setSelectedHubId] = useState("all");
   const [orders, setOrders] = useState<OrderMonitorView[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -88,12 +96,13 @@ export default function App() {
     setLoadState("loading");
     setError(null);
     try {
-      const result = await runSingleFlightRefresh(query);
+      const result = await runSingleFlightRefresh(query, language, selectedHubId);
       if (!mountedRef.current) {
         return;
       }
       setLookup(result.lookup);
       setCandidates(result.candidates);
+      setHubs(result.hubs);
       setOrders(result.orders);
       setSyncStatus(result.syncStatus);
       setLoadState("ready");
@@ -103,6 +112,7 @@ export default function App() {
       }
       setLookup(null);
       setCandidates([]);
+      setHubs([]);
       setOrders([]);
       setSyncStatus(null);
       setError(err instanceof Error ? err.message : String(err));
@@ -118,7 +128,7 @@ export default function App() {
     return () => {
       mountedRef.current = false;
     };
-  }, []);
+  }, [language, selectedHubId]);
 
   return (
     <main className="app-shell">
@@ -187,11 +197,26 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>{t("selection.title")}</h2>
-            <span>{t("selection.count", { count: candidates.length })}</span>
+            <div className="panel-actions">
+              <select
+                value={selectedHubId}
+                onChange={(event) => setSelectedHubId(event.target.value)}
+                aria-label={t("selection.hub")}
+              >
+                <option value="all">{t("selection.allHubs")}</option>
+                {hubs.map((hub) => (
+                  <option key={hub.hub_id} value={hub.hub_id}>
+                    {hub.display_name}
+                  </option>
+                ))}
+              </select>
+              <span>{t("selection.count", { count: candidates.length })}</span>
+            </div>
           </div>
           <table>
             <thead>
               <tr>
+                <th>{t("selection.hub")}</th>
                 <th>{t("selection.item")}</th>
                 <th>{t("selection.entry")}</th>
                 <th>{t("selection.exit")}</th>
@@ -202,7 +227,8 @@ export default function App() {
             </thead>
             <tbody>
               {candidates.map((candidate) => (
-                <tr key={candidate.type_id}>
+                <tr key={`${candidate.hub_id}-${candidate.type_id}`}>
+                  <td>{candidate.hub_name}</td>
                   <td>{candidate.item_name}</td>
                   <td>{candidate.recommended_entry_price}</td>
                   <td>{candidate.recommended_exit_price}</td>

@@ -26,6 +26,10 @@ pub fn fixture_market_lookup(query: &str) -> MarketLookupView {
 pub fn fixture_selection_candidates() -> Vec<SelectionCandidateView> {
     vec![
         SelectionCandidateView {
+            hub_id: "jita".to_string(),
+            hub_name: "Jita".to_string(),
+            region_id: crate::THE_FORGE_REGION_ID,
+            station_id: crate::JITA_4_4_STATION_ID,
             type_id: 34,
             item_name: "Tritanium".to_string(),
             recommended_entry_price: "5.01".to_string(),
@@ -39,8 +43,13 @@ pub fn fixture_selection_candidates() -> Vec<SelectionCandidateView> {
                 "high_daily_volume".to_string(),
                 "deep_top_book".to_string(),
             ],
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
         },
         SelectionCandidateView {
+            hub_id: "jita".to_string(),
+            hub_name: "Jita".to_string(),
+            region_id: crate::THE_FORGE_REGION_ID,
+            station_id: crate::JITA_4_4_STATION_ID,
             type_id: 35,
             item_name: "Pyerite".to_string(),
             recommended_entry_price: "11.20".to_string(),
@@ -53,6 +62,7 @@ pub fn fixture_selection_candidates() -> Vec<SelectionCandidateView> {
                 "acceptable_spread".to_string(),
                 "moderate_velocity".to_string(),
             ],
+            last_synced_at: "2026-05-25T12:00:00Z".to_string(),
         },
     ]
 }

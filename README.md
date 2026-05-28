@@ -83,7 +83,7 @@ export EVETOOLS_TEST_DATABASE_ALLOW_REMOTE=1
 
 ## 公开 ESI 市场同步
 
-桌面应用可以使用公开 ESI 数据驱动 Jita 市场查询和选品看板。后端同时具备第一版 Supabase 市场订单同步基础，可按主流 NPC trade hub 过滤并保存公开区域订单快照。
+桌面应用可以使用公开 ESI 数据驱动 Jita 市场查询，并使用 Supabase 中的最新成功市场订单快照驱动多交易点 Selection Discovery。后端具备第一版 Supabase 市场订单同步基础，可按主流 NPC trade hub 过滤并保存公开区域订单快照。
 
 市场数据源由 `EVETOOLS_MARKET_SOURCE` 控制：
 
@@ -103,12 +103,12 @@ EVETOOLS_MARKET_SOURCE=fixture pnpm dev
 
 当前桌面 UI 公开数据切片刻意保持较小范围：
 
-- 只覆盖 The Forge 区域。
-- 只使用 Jita 4-4 空间站订单做 top-of-book 分析。
-- 选品发现使用固定种子池。
-- 公开 ESI 网络、状态码或解码失败时使用 fixture fallback。
+- Market Price Lookup 仍只覆盖 The Forge / Jita 4-4。
+- Selection Discovery 支持 Jita、Amarr、Dodixie、Rens、Hek；需要先同步对应 region 才会显示该交易点的快照推荐。
+- Selection Discovery 默认读取最新成功快照，不再使用固定 type_id 种子池，并可在 UI 中按交易点筛选。
+- 公开 ESI 网络、状态码、解码失败，或本地未配置数据库/未同步快照时使用 fixture fallback。
 
-市场订单持久化切片已经定义以下 NPC trade hubs：Jita、Amarr、Dodixie、Rens、Hek。Worker 层会从 `GET /markets/{region_id}/orders/` 拉取区域公开订单，按这些 station ID 过滤后写入 Supabase 的 `trade_hubs`、`market_sync_runs` 和 `market_order_snapshots` 表。后续 Selection Discovery 会基于这些快照替换固定种子池。
+市场订单持久化切片已经定义以下 NPC trade hubs：Jita、Amarr、Dodixie、Rens、Hek。Worker 层会从 `GET /markets/{region_id}/orders/` 拉取区域公开订单，按这些 station ID 过滤后写入 Supabase 的 `trade_hubs`、`market_sync_runs` 和 `market_order_snapshots` 表。Selection Discovery 会聚合最新成功快照中的 type 级买卖盘口，按价差、净利润、流动性和置信度排序。
 
 认证角色订单监控在 SSO 阶段前仍由 fixture 驱动。
 
@@ -127,7 +127,22 @@ cargo run -p evetools-worker --bin sync-public-market-region -- --region-id 1000
 cargo run -p evetools-worker --bin sync-public-market-region
 ```
 
+同步第一版全部主流 NPC 交易点：
+
+```bash
+for region_id in 10000002 10000043 10000032 10000030 10000042; do
+  cargo run -p evetools-worker --bin sync-public-market-region -- --region-id "$region_id"
+done
+```
+
 CLI 会运行数据库 migrations、写入/更新默认 trade hubs、创建 `market_sync_runs`，并把过滤后的订单写入 `market_order_snapshots`。成功后会输出本次 `sync_run_id`。`EVETOOLS_ESI_BASE_URL` 仅用于本地测试或 mock ESI，不需要在正常使用时设置。
+
+同步至少一个 region 后，可以启动桌面端查看快照驱动的 Selection Discovery：
+
+```bash
+export EVETOOLS_DATABASE_URL="<supabase-postgres-url-with-sslmode-require>"
+pnpm --dir apps/desktop dev
+```
 
 ## 只读查询 API
 
@@ -140,6 +155,7 @@ CLI 会运行数据库 migrations、写入/更新默认 trade hubs、创建 `mar
 - 按关键字搜索本地化物品信息。
 - 查询启用的 trade hubs。
 - 查询指定 station 的最新成功市场订单快照。
+- 基于启用 trade hubs 的最新成功订单快照生成 Selection Discovery 推荐，并支持按 hub id 过滤。
 
 未来引入 hosted API 时，应优先复用 `EveToolsReadApi`，再在外层增加 Axum、Supabase Edge Function 或其他 HTTP/RPC adapter。
 
@@ -246,7 +262,7 @@ React 渲染后端准备好的 views，并调用 Tauri commands。Tauri commands
 第一个桌面屏幕包含三个界面：
 
 - `Market Price Lookup`：查询某个物品当前 Jita 价格状态。
-- `Selection Discovery`：列出候选物品及入场价、出场价、净利润、评分和理由。
+- `Selection Discovery`：基于最新 hub 快照列出推荐物品、交易点、入场价、出场价、净利润、评分和理由。
 - `Order Monitor`：展示类似活跃订单的 fixture rows，并给出建议动作和紧急度。
 
 同步状态分为公开和私有流程：
@@ -260,14 +276,15 @@ React 渲染后端准备好的 views，并调用 Tauri commands。Tauri commands
 当前 foundation 范围内：
 
 - 本地 Tauri 桌面壳。
-- 基于公开 ESI 的市场查询和选品发现。
+- 基于公开 ESI 的市场查询。
+- 基于 Supabase 市场订单快照的多 hub Selection Discovery。
 - Fixture fallback command 边界。
 - 连接到 Tauri commands 的 React UI。
 - 确定性、可测试的 Rust 领域计算。
 
 当前 foundation 范围外：
 
-- Supabase 静态 SDE catalog 之外的完整交易持久化。
+- 全区域、全历史市场数据库。
 - EVE SSO token 处理。
 - 认证角色订单同步。
 - 自动下单、改单或撤单。

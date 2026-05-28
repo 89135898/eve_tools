@@ -133,6 +133,12 @@ form {
   margin-bottom: 12px;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .lookup-panel {
   margin-bottom: 16px;
 }
@@ -202,7 +208,8 @@ th {
   }
 
   .topbar,
-  .topbar-actions {
+  .topbar-actions,
+  .panel-actions {
     align-items: flex-start;
     flex-direction: column;
   }

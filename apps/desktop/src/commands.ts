@@ -16,6 +16,10 @@ export type MarketLookupView = {
 };
 
 export type SelectionCandidateView = {
+  hub_id: string;
+  hub_name: string;
+  region_id: number;
+  station_id: number;
   type_id: number;
   item_name: string;
   recommended_entry_price: string;
@@ -25,6 +29,17 @@ export type SelectionCandidateView = {
   liquidity_score: number;
   confidence_score: number;
   reason_codes: string[];
+  last_synced_at: string;
+};
+
+export type TradeHubView = {
+  hub_id: string;
+  display_name: string;
+  region_id: number;
+  system_id: number;
+  station_id: number;
+  enabled: boolean;
+  sort_order: number;
 };
 
 export type OrderMonitorView = {
@@ -51,8 +66,15 @@ export function lookupMarketPrice(query: string): Promise<MarketLookupView> {
   return invoke<MarketLookupView>("lookup_market_price", { query });
 }
 
-export function listSelectionCandidates(): Promise<SelectionCandidateView[]> {
-  return invoke<SelectionCandidateView[]>("list_selection_candidates");
+export function listSelectionCandidates(
+  language: string,
+  hubIds: string[]
+): Promise<SelectionCandidateView[]> {
+  return invoke<SelectionCandidateView[]>("list_selection_candidates", { language, hubIds });
+}
+
+export function listTradeHubs(): Promise<TradeHubView[]> {
+  return invoke<TradeHubView[]>("list_trade_hubs");
 }
 
 export function listOrderMonitorItems(): Promise<OrderMonitorView[]> {

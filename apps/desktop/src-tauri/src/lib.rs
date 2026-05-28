@@ -1,17 +1,18 @@
 use chrono::Utc;
+use evetools_api::{EveToolsReadApi, SelectionCandidatesRequest, TradeHubView};
 use evetools_catalog::{CatalogConfig, CatalogService};
 use evetools_db::{CatalogStatus, InventoryTypeView};
 use evetools_domain::fixtures::{
     fixture_market_lookup, fixture_order_monitor, fixture_selection_candidates,
 };
 use evetools_domain::{
-    build_selection_candidate, classify_price_trend, summarize_jita_market, FeeProfile,
-    MarketLookupView, OrderMonitorView, PublicMarketHistoryDay, PublicMarketOrder,
-    SelectionCandidateView, THE_FORGE_REGION_ID,
+    classify_price_trend, summarize_jita_market, MarketLookupView, OrderMonitorView,
+    PublicMarketHistoryDay, PublicMarketOrder, SelectionCandidateView, THE_FORGE_REGION_ID,
 };
 use evetools_esi::{EsiClient, EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType};
 use evetools_worker::{
-    fixture_fallback_sync_status, fixture_sync_status, live_sync_status, SyncStatus,
+    default_trade_hubs_as_db_records, fixture_fallback_sync_status, fixture_sync_status,
+    live_sync_status, SyncStatus,
 };
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
@@ -19,12 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-const SELECTION_SEED_TYPES: &[(i32, &str)] = &[
-    (34, "Tritanium"),
-    (35, "Pyerite"),
-    (36, "Mexallon"),
-    (37, "Isogen"),
-];
+const DEFAULT_SELECTION_LIMIT: i64 = 25;
 
 static PUBLIC_MARKET_USED_FALLBACK: AtomicBool = AtomicBool::new(false);
 
@@ -118,8 +114,25 @@ async fn lookup_market_price_live(
 }
 
 #[tauri::command]
-async fn list_selection_candidates() -> Result<Vec<SelectionCandidateView>, String> {
-    list_selection_candidates_with_source(MarketSource::from_env()).await
+async fn list_selection_candidates(
+    state: tauri::State<'_, ReadApiState>,
+    language: String,
+    hub_ids: Vec<String>,
+) -> Result<Vec<SelectionCandidateView>, String> {
+    if MarketSource::from_env().is_fixture() {
+        return list_selection_candidates_with_source(MarketSource::Fixture).await;
+    }
+
+    match list_selection_candidates_from_snapshots(&state, language, hub_ids).await {
+        Ok(candidates) if !candidates.is_empty() => {
+            mark_public_market_fallback(false);
+            Ok(candidates)
+        }
+        Ok(_) | Err(_) => {
+            mark_public_market_fallback(true);
+            Ok(fixture_selection_candidates())
+        }
+    }
 }
 
 async fn list_selection_candidates_with_source(
@@ -130,53 +143,28 @@ async fn list_selection_candidates_with_source(
             mark_public_market_fallback(false);
             Ok(fixture_selection_candidates())
         }
-        MarketSource::Live(client) => {
-            let mut candidates = Vec::new();
-            for (type_id, item_name) in SELECTION_SEED_TYPES {
-                if let Ok(candidate) = selection_candidate_live(*type_id, item_name, &client).await
-                {
-                    candidates.push(candidate);
-                }
-            }
-
-            if candidates.is_empty() {
-                mark_public_market_fallback(true);
-                Ok(fixture_selection_candidates())
-            } else {
-                mark_public_market_fallback(false);
-                candidates.sort_by(|left, right| {
-                    right
-                        .attention_score
-                        .cmp(&left.attention_score)
-                        .then_with(|| left.item_name.cmp(&right.item_name))
-                });
-                Ok(candidates)
-            }
+        MarketSource::Live(_) => {
+            mark_public_market_fallback(true);
+            Ok(fixture_selection_candidates())
         }
     }
 }
 
-async fn selection_candidate_live(
-    type_id: i32,
-    item_name: &str,
-    client: &EsiClient,
-) -> Result<SelectionCandidateView, EsiError> {
-    let orders = client
-        .market_orders(THE_FORGE_REGION_ID, type_id, EsiOrderType::All)
-        .await?;
-    let history = client.market_history(THE_FORGE_REGION_ID, type_id).await?;
-    let domain_orders = to_domain_orders(&orders);
-    let domain_history = to_domain_history(&history);
-    let summary = summarize_jita_market(
-        type_id,
-        item_name,
-        &domain_orders,
-        &domain_history,
-        Utc::now().to_rfc3339(),
-    );
-    let analysis = build_selection_candidate(&summary, &FeeProfile::conservative_default());
-
-    Ok(SelectionCandidateView::from_analysis(analysis))
+async fn list_selection_candidates_from_snapshots(
+    state: &ReadApiState,
+    language: String,
+    hub_ids: Vec<String>,
+) -> Result<Vec<SelectionCandidateView>, String> {
+    state
+        .get()
+        .await?
+        .selection_candidates(SelectionCandidatesRequest {
+            hub_ids,
+            language,
+            limit_per_hub: DEFAULT_SELECTION_LIMIT,
+        })
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn to_domain_orders(orders: &[EsiMarketOrder]) -> Vec<PublicMarketOrder> {
@@ -227,6 +215,24 @@ fn get_sync_status_with_source(source: MarketSource) -> Result<SyncStatus, Strin
     }
 }
 
+#[tauri::command]
+async fn list_trade_hubs(
+    state: tauri::State<'_, ReadApiState>,
+) -> Result<Vec<TradeHubView>, String> {
+    if MarketSource::from_env().is_fixture() {
+        return Ok(default_trade_hubs_as_db_records());
+    }
+
+    match state.get().await {
+        Ok(api) => api
+            .list_trade_hubs()
+            .await
+            .map_err(|error| error.to_string())
+            .or_else(|_| Ok(default_trade_hubs_as_db_records())),
+        Err(_) => Ok(default_trade_hubs_as_db_records()),
+    }
+}
+
 #[derive(Default)]
 struct CatalogServiceState {
     service: OnceCell<Arc<CatalogService>>,
@@ -238,6 +244,32 @@ impl CatalogServiceState {
             .get_or_try_init(|| async {
                 let config = CatalogConfig::from_env().map_err(|error| error.to_string())?;
                 CatalogService::connect(config)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map(Arc::clone)
+    }
+}
+
+#[derive(Default)]
+struct ReadApiState {
+    api: OnceCell<Arc<EveToolsReadApi>>,
+}
+
+impl ReadApiState {
+    async fn get(&self) -> Result<Arc<EveToolsReadApi>, String> {
+        self.api
+            .get_or_try_init(|| async {
+                let database_url = std::env::var("EVETOOLS_DATABASE_URL")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if database_url.is_empty() {
+                    return Err("EVETOOLS_DATABASE_URL is required".to_string());
+                }
+                EveToolsReadApi::connect(&database_url)
                     .await
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
@@ -303,9 +335,11 @@ async fn get_inventory_type(
 pub fn run() {
     tauri::Builder::default()
         .manage(CatalogServiceState::default())
+        .manage(ReadApiState::default())
         .invoke_handler(tauri::generate_handler![
             lookup_market_price,
             list_selection_candidates,
+            list_trade_hubs,
             list_order_monitor_items,
             get_sync_status,
             get_sde_catalog_status,
