@@ -57,6 +57,8 @@ pub enum CatalogServiceError {
     Database(#[from] evetools_db::CatalogDbError),
     #[error("sql migration or connection error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("sql migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
     #[error("SDE download error: {0}")]
     SdeClient(#[from] evetools_sde::SdeClientError),
     #[error("SDE archive error: {0}")]

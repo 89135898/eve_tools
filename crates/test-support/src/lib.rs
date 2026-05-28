@@ -66,6 +66,10 @@ pub async fn reset_evetools_catalog_schema(pool: &PgPool) -> Result<(), sqlx::Er
         .persistent(false)
         .execute(pool)
         .await?;
+    sqlx::query("DROP TABLE IF EXISTS _sqlx_migrations")
+        .persistent(false)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

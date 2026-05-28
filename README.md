@@ -57,7 +57,7 @@ pnpm build
 默认测试分三层：
 
 - 纯 Rust/TypeScript 单元测试：不需要数据库，`cargo test --workspace` 和 `pnpm typecheck` 会直接运行。
-- Postgres integration tests：只允许连接本地一次性 Postgres，测试开始会删除并重建 `evetools_catalog` schema。
+- Postgres integration tests：只允许连接本地一次性 Postgres，测试开始会删除并重建 `evetools_catalog` schema 和 SQLx migration metadata。
 - 远程 Supabase 验证：默认禁止，只有人工确认要破坏性测试远程库时才显式开启。
 
 推荐使用仓库内的本地测试库：
@@ -141,7 +141,17 @@ export EVETOOLS_TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432
 cargo test -p evetools-db --test catalog_repository -- --nocapture
 ```
 
-未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。测试启动后会先 `DROP SCHEMA evetools_catalog CASCADE` 再迁移 schema，因此它只适合本地 disposable Postgres。`evetools-test-support` 默认拒绝非本地主机，避免测试样例把完整 SDE 数据替换成一行 fixture。
+未设置 `EVETOOLS_TEST_DATABASE_URL` 时，Postgres integration tests 会自动跳过。测试启动后会先删除 `evetools_catalog` schema 和 `_sqlx_migrations`，再重新执行 migrations，因此它只适合本地 disposable Postgres。`evetools-test-support` 默认拒绝非本地主机，避免测试样例把完整 SDE 数据替换成一行 fixture。
+
+### SQL Migrations
+
+数据库 schema 使用 SQLx 版本化 migrations，目录位于 `crates/db/migrations`：
+
+- `0001_create_catalog_schema.sql`：SDE catalog 核心表、外键和基础索引。
+- `0002_add_catalog_localizations.sql`：标准化多语言 localization 表和语言检索索引。
+- `0003_add_market_sync_tables.sql`：trade hub、market sync run 和订单快照表。
+
+应用仍通过 `migrate_catalog_schema()` 执行迁移；它会调用内嵌的 SQLx migrator，并在数据库的 `_sqlx_migrations` 表记录已应用版本。新增 schema 变更时不要再把 SQL 追加到 Rust 字符串常量中，应新增一个递增编号的 migration 文件，并补充对应 repository 或 schema 测试。
 
 需要手动初始化或修复完整官方 SDE catalog 时，使用 admin CLI：
 
