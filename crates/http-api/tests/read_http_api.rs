@@ -27,6 +27,21 @@ async fn read_http_api_exposes_health_hubs_and_selection_candidates() {
     assert_eq!(health.status(), 200);
     assert_eq!(json_body(health).await["status"], "ok");
 
+    let ready = router.clone().oneshot(request("/ready")).await.unwrap();
+    assert_eq!(ready.status(), 200);
+    let ready = json_body(ready).await;
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["database"], "ok");
+
+    let sync_health = router
+        .clone()
+        .oneshot(request("/sync-health"))
+        .await
+        .unwrap();
+    assert_eq!(sync_health.status(), 200);
+    let sync_health = json_body(sync_health).await;
+    assert_eq!(sync_health["hubs"].as_array().unwrap()[0]["hub_id"], "jita");
+
     let hubs = router
         .clone()
         .oneshot(request("/trade-hubs"))

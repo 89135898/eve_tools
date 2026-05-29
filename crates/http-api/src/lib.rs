@@ -98,6 +98,8 @@ pub async fn serve(config: HttpApiConfig) -> Result<(), HttpApiServeError> {
 pub fn build_router(api: EveToolsReadApi) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/sync-health", get(sync_health))
         .route("/catalog/status", get(catalog_status))
         .route("/inventory-types/{type_id}", get(get_inventory_type))
         .route("/inventory-types/search", get(search_inventory_types))
@@ -112,6 +114,14 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
+}
+
+async fn readiness(State(api): State<EveToolsReadApi>) -> Result<Response, HttpApiError> {
+    Ok(Json(api.readiness().await?).into_response())
+}
+
+async fn sync_health(State(api): State<EveToolsReadApi>) -> Result<Response, HttpApiError> {
+    Ok(Json(api.sync_health().await?).into_response())
 }
 
 async fn catalog_status(State(api): State<EveToolsReadApi>) -> Result<Response, HttpApiError> {
