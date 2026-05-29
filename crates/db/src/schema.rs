@@ -59,7 +59,8 @@ mod tests {
                 (1, "create catalog schema"),
                 (2, "add catalog localizations"),
                 (3, "add market sync tables"),
-                (4, "add market sync operations")
+                (4, "add market sync operations"),
+                (5, "add authenticated order monitor")
             ]
         );
     }
@@ -145,6 +146,19 @@ mod tests {
         assert_schema_contains("ROW_NUMBER() OVER");
         assert_schema_contains("idx_evetools_market_sync_runs_one_active_region");
         assert_schema_contains("WHERE status IN ('leased', 'running')");
+    }
+
+    #[test]
+    fn adds_authenticated_order_monitor_tables() {
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.characters");
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_auth_tokens");
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_sync_runs");
+        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_snapshots");
+        assert_schema_contains("PRIMARY KEY (character_id)");
+        assert_schema_contains("refresh_token TEXT NOT NULL");
+        assert_schema_contains("scopes TEXT[] NOT NULL");
+        assert_schema_contains("PRIMARY KEY (sync_run_id, order_id)");
+        assert_schema_contains("idx_evetools_character_order_snapshots_character_type");
     }
 
     #[test]
