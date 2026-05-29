@@ -7,7 +7,7 @@ use axum::{
 };
 use evetools_api::{
     ApiError, EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest,
-    SelectionCandidatesRequest, StationOrdersRequest,
+    MarketLookupRequest, SelectionCandidatesRequest, StationOrdersRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, str::FromStr};
@@ -101,6 +101,7 @@ pub fn build_router(api: EveToolsReadApi) -> Router {
         .route("/catalog/status", get(catalog_status))
         .route("/inventory-types/{type_id}", get(get_inventory_type))
         .route("/inventory-types/search", get(search_inventory_types))
+        .route("/market-lookup", get(market_lookup))
         .route("/trade-hubs", get(list_trade_hubs))
         .route("/station-orders", get(latest_station_orders))
         .route("/selection-candidates", get(selection_candidates))
@@ -141,6 +142,21 @@ async fn search_inventory_types(
             query: query.query,
             language: query.language.unwrap_or_else(default_language),
             limit: query.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+        })
+        .await?,
+    )
+    .into_response())
+}
+
+async fn market_lookup(
+    State(api): State<EveToolsReadApi>,
+    Query(query): Query<MarketLookupQuery>,
+) -> Result<Response, HttpApiError> {
+    Ok(Json(
+        api.lookup_market_price(MarketLookupRequest {
+            query: query.query,
+            language: query.language.unwrap_or_else(default_language),
+            hub_id: query.hub_id,
         })
         .await?,
     )
@@ -204,6 +220,13 @@ struct InventoryTypeSearchQuery {
     query: String,
     language: Option<String>,
     limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct MarketLookupQuery {
+    query: String,
+    language: Option<String>,
+    hub_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

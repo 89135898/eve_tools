@@ -4,8 +4,8 @@ use evetools_db::{
     TradeHub,
 };
 use evetools_domain::{
-    build_selection_candidate, FeeProfile, OrderBookSummary, SelectionCandidateHubView,
-    SelectionCandidateView,
+    build_selection_candidate, FeeProfile, MarketLookupView, OrderBookSummary, PriceTrend,
+    SelectionCandidateHubView, SelectionCandidateView,
 };
 use rust_decimal::{prelude::FromPrimitive, Decimal};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ pub use evetools_db::{
 };
 
 const MAX_SELECTION_CANDIDATE_LIMIT: usize = 100;
+const DEFAULT_MARKET_LOOKUP_HUB_ID: &str = "jita";
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -42,6 +43,13 @@ pub struct InventoryTypeSearchRequest {
     pub query: String,
     pub language: String,
     pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketLookupRequest {
+    pub query: String,
+    pub language: String,
+    pub hub_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +110,44 @@ impl EveToolsReadApi {
             .await?)
     }
 
+    pub async fn lookup_market_price(
+        &self,
+        request: MarketLookupRequest,
+    ) -> Result<Option<MarketLookupView>, ApiError> {
+        let Some(inventory_type) = self.resolve_inventory_type(&request).await? else {
+            return Ok(None);
+        };
+        let hub_id = request
+            .hub_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_MARKET_LOOKUP_HUB_ID);
+        let Some(hub) = self
+            .market
+            .list_enabled_trade_hubs()
+            .await?
+            .into_iter()
+            .find(|hub| hub.hub_id == hub_id)
+        else {
+            return Ok(None);
+        };
+        let Some(book) = self
+            .market
+            .latest_station_order_book(
+                hub.region_id,
+                hub.station_id,
+                inventory_type.type_id,
+                &request.language,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        Ok(station_order_book_to_market_lookup(book))
+    }
+
     pub async fn list_trade_hubs(&self) -> Result<Vec<TradeHub>, ApiError> {
         Ok(self.market.list_enabled_trade_hubs().await?)
     }
@@ -152,6 +198,28 @@ impl EveToolsReadApi {
         }
 
         Ok(all_candidates)
+    }
+
+    async fn resolve_inventory_type(
+        &self,
+        request: &MarketLookupRequest,
+    ) -> Result<Option<InventoryTypeView>, ApiError> {
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(type_id) = query.parse::<i32>() {
+            return Ok(self
+                .catalog
+                .get_inventory_type(type_id, &request.language)
+                .await?);
+        }
+        Ok(self
+            .catalog
+            .search_inventory_types(query, &request.language, 1)
+            .await?
+            .into_iter()
+            .next())
     }
 }
 
@@ -214,4 +282,18 @@ fn selection_candidate_from_order_book(
             last_synced_at: book.last_synced_at,
         },
     ))
+}
+
+fn station_order_book_to_market_lookup(book: StationOrderBook) -> Option<MarketLookupView> {
+    let summary = OrderBookSummary {
+        type_id: book.type_id,
+        item_name: book.display_name,
+        best_bid: Decimal::from_f64(book.best_bid)?,
+        best_ask: Decimal::from_f64(book.best_ask)?,
+        daily_volume: u64::try_from(book.visible_volume).ok()?,
+        top_buy_depth: u64::try_from(book.top_buy_depth).ok()?,
+        top_sell_depth: u64::try_from(book.top_sell_depth).ok()?,
+        last_synced_at: book.last_synced_at,
+    };
+    Some(MarketLookupView::from_summary(summary, PriceTrend::Stable))
 }

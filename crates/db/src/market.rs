@@ -380,6 +380,119 @@ impl MarketRepository {
             .collect())
     }
 
+    pub async fn latest_station_order_book(
+        &self,
+        region_id: i32,
+        station_id: i64,
+        type_id: i32,
+        language: &str,
+    ) -> Result<Option<StationOrderBook>, MarketDbError> {
+        let language_fallbacks = language_fallbacks(language);
+        let row = sqlx::query_as::<_, StationOrderBookRecord>(
+            "WITH latest_run AS (
+                SELECT sync_run_id, COALESCE(completed_at, started_at) AS synced_at
+                FROM evetools_catalog.market_sync_runs
+                WHERE region_id = $1 AND status = 'success'
+                ORDER BY completed_at DESC NULLS LAST, sync_run_id DESC
+                LIMIT 1
+             ),
+             station_orders AS (
+                SELECT
+                    lr.synced_at,
+                    o.sync_run_id,
+                    o.region_id,
+                    o.station_id,
+                    o.type_id,
+                    o.is_buy_order,
+                    o.price,
+                    o.volume_remain
+                FROM evetools_catalog.market_order_snapshots o
+                JOIN latest_run lr ON lr.sync_run_id = o.sync_run_id
+                WHERE o.region_id = $1 AND o.station_id = $2 AND o.type_id = $3
+             ),
+             best_prices AS (
+                SELECT
+                    sync_run_id,
+                    region_id,
+                    station_id,
+                    type_id,
+                    synced_at,
+                    MAX(price) FILTER (WHERE is_buy_order) AS best_bid,
+                    MIN(price) FILTER (WHERE NOT is_buy_order) AS best_ask,
+                    SUM(volume_remain)::BIGINT AS visible_volume
+                FROM station_orders
+                GROUP BY sync_run_id, region_id, station_id, type_id, synced_at
+                HAVING
+                    MAX(price) FILTER (WHERE is_buy_order) IS NOT NULL
+                    AND MIN(price) FILTER (WHERE NOT is_buy_order) IS NOT NULL
+             ),
+             books AS (
+                SELECT
+                    bp.sync_run_id,
+                    bp.region_id,
+                    bp.station_id,
+                    bp.type_id,
+                    bp.synced_at,
+                    bp.best_bid,
+                    bp.best_ask,
+                    COALESCE(SUM(CASE
+                        WHEN o.is_buy_order AND o.price = bp.best_bid THEN o.volume_remain
+                        ELSE 0
+                    END), 0)::BIGINT AS top_buy_depth,
+                    COALESCE(SUM(CASE
+                        WHEN NOT o.is_buy_order AND o.price = bp.best_ask THEN o.volume_remain
+                        ELSE 0
+                    END), 0)::BIGINT AS top_sell_depth,
+                    bp.visible_volume
+                FROM best_prices bp
+                JOIN station_orders o
+                    ON o.sync_run_id = bp.sync_run_id
+                    AND o.station_id = bp.station_id
+                    AND o.type_id = bp.type_id
+                GROUP BY
+                    bp.sync_run_id,
+                    bp.region_id,
+                    bp.station_id,
+                    bp.type_id,
+                    bp.synced_at,
+                    bp.best_bid,
+                    bp.best_ask,
+                    bp.visible_volume
+             )
+             SELECT
+                b.sync_run_id,
+                b.region_id,
+                b.station_id,
+                b.type_id,
+                COALESCE(
+                    (SELECT l.name
+                     FROM evetools_catalog.inventory_type_localizations l
+                     WHERE l.type_id = b.type_id AND l.name IS NOT NULL
+                     ORDER BY COALESCE(array_position($4::text[], l.language), 2147483647), l.language
+                     LIMIT 1),
+                    t.name_en,
+                    t.name_zh
+                ) AS display_name,
+                b.best_bid,
+                b.best_ask,
+                b.top_buy_depth,
+                b.top_sell_depth,
+                b.visible_volume,
+                b.synced_at
+             FROM books b
+             LEFT JOIN evetools_catalog.inventory_types t ON t.type_id = b.type_id",
+        )
+        .persistent(false)
+        .bind(region_id)
+        .bind(station_id)
+        .bind(type_id)
+        .bind(language_fallbacks)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(station_order_book_from_record))
+    }
+
     async fn latest_successful_sync_run(
         &self,
         region_id: i32,

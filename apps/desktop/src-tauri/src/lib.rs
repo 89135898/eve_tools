@@ -1,4 +1,3 @@
-use chrono::Utc;
 use evetools_api::{
     CatalogStatusView as CatalogStatus, InventoryTypeApiView as InventoryTypeView,
     SelectionCandidatesRequest, TradeHubView,
@@ -6,17 +5,11 @@ use evetools_api::{
 use evetools_domain::fixtures::{
     fixture_market_lookup, fixture_order_monitor, fixture_selection_candidates,
 };
-use evetools_domain::{
-    classify_price_trend, summarize_jita_market, MarketLookupView, OrderMonitorView,
-    PublicMarketHistoryDay, PublicMarketOrder, SelectionCandidateView, THE_FORGE_REGION_ID,
-};
-use evetools_esi::{EsiClient, EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType};
+use evetools_domain::{MarketLookupView, OrderMonitorView, SelectionCandidateView};
 use evetools_worker::{
     default_trade_hubs_as_db_records, fixture_fallback_sync_status, fixture_sync_status,
     live_sync_status, SyncStatus,
 };
-use rust_decimal::prelude::FromPrimitive;
-use rust_decimal::Decimal;
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,14 +23,14 @@ static PUBLIC_MARKET_USED_FALLBACK: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Debug)]
 enum MarketSource {
     Fixture,
-    Live(EsiClient),
+    Live,
 }
 
 impl MarketSource {
     fn from_env() -> Self {
         match std::env::var("EVETOOLS_MARKET_SOURCE") {
             Ok(value) if value.eq_ignore_ascii_case("fixture") => Self::Fixture,
-            _ => Self::Live(EsiClient::tranquility()),
+            _ => Self::Live,
         }
     }
 
@@ -55,12 +48,18 @@ fn public_market_used_fallback() -> bool {
 }
 
 #[tauri::command]
-async fn lookup_market_price(query: String) -> Result<MarketLookupView, String> {
-    lookup_market_price_with_source(query, MarketSource::from_env()).await
+async fn lookup_market_price(
+    state: tauri::State<'_, ReadApiState>,
+    query: String,
+    language: String,
+) -> Result<MarketLookupView, String> {
+    lookup_market_price_with_state(&state, query, language, MarketSource::from_env()).await
 }
 
-async fn lookup_market_price_with_source(
+async fn lookup_market_price_with_state(
+    state: &ReadApiState,
     query: String,
+    language: String,
     source: MarketSource,
 ) -> Result<MarketLookupView, String> {
     let trimmed = query.trim();
@@ -73,47 +72,31 @@ async fn lookup_market_price_with_source(
             mark_public_market_fallback(false);
             Ok(fixture_market_lookup(trimmed))
         }
-        MarketSource::Live(client) => match lookup_market_price_live(trimmed, &client).await {
-            Ok(view) => {
-                mark_public_market_fallback(false);
-                Ok(view)
+        MarketSource::Live => {
+            match lookup_market_price_from_hosted(state, trimmed, &language).await {
+                Ok(Some(view)) => {
+                    mark_public_market_fallback(false);
+                    Ok(view)
+                }
+                Ok(None) | Err(_) => {
+                    mark_public_market_fallback(true);
+                    Ok(fixture_market_lookup(trimmed))
+                }
             }
-            Err(EsiError::ItemNotFound) => {
-                mark_public_market_fallback(false);
-                Err("Item not found".to_string())
-            }
-            Err(_) => {
-                mark_public_market_fallback(true);
-                Ok(fixture_market_lookup(trimmed))
-            }
-        },
+        }
     }
 }
 
-async fn lookup_market_price_live(
+async fn lookup_market_price_from_hosted(
+    state: &ReadApiState,
     query: &str,
-    client: &EsiClient,
-) -> Result<MarketLookupView, EsiError> {
-    let resolved = client.resolve_inventory_type(query).await?;
-    let orders = client
-        .market_orders(THE_FORGE_REGION_ID, resolved.type_id, EsiOrderType::All)
-        .await?;
-    let history = client
-        .market_history(THE_FORGE_REGION_ID, resolved.type_id)
-        .await?;
-
-    let domain_orders = to_domain_orders(&orders);
-    let domain_history = to_domain_history(&history);
-    let summary = summarize_jita_market(
-        resolved.type_id,
-        resolved.name,
-        &domain_orders,
-        &domain_history,
-        Utc::now().to_rfc3339(),
-    );
-    let trend = classify_price_trend(&domain_history);
-
-    Ok(MarketLookupView::from_summary(summary, trend))
+    language: &str,
+) -> Result<Option<MarketLookupView>, String> {
+    state
+        .get()
+        .await?
+        .lookup_market_price(query, language)
+        .await
 }
 
 #[tauri::command]
@@ -146,7 +129,7 @@ async fn list_selection_candidates_with_source(
             mark_public_market_fallback(false);
             Ok(fixture_selection_candidates())
         }
-        MarketSource::Live(_) => {
+        MarketSource::Live => {
             mark_public_market_fallback(true);
             Ok(fixture_selection_candidates())
         }
@@ -168,34 +151,6 @@ async fn list_selection_candidates_from_snapshots(
         })
         .await
         .map_err(|error| error.to_string())
-}
-
-fn to_domain_orders(orders: &[EsiMarketOrder]) -> Vec<PublicMarketOrder> {
-    orders
-        .iter()
-        .filter_map(|order| {
-            Some(PublicMarketOrder {
-                type_id: order.type_id,
-                location_id: order.location_id,
-                is_buy_order: order.is_buy_order,
-                price: Decimal::from_f64(order.price)?,
-                volume_remain: u64::try_from(order.volume_remain).ok()?,
-            })
-        })
-        .collect()
-}
-
-fn to_domain_history(history: &[EsiMarketHistoryDay]) -> Vec<PublicMarketHistoryDay> {
-    history
-        .iter()
-        .filter_map(|day| {
-            Some(PublicMarketHistoryDay {
-                average: Decimal::from_f64(day.average)?,
-                date: day.date.clone(),
-                volume: u64::try_from(day.volume).ok()?,
-            })
-        })
-        .collect()
 }
 
 #[tauri::command]
@@ -325,6 +280,22 @@ impl HostedReadApiClient {
         .await
     }
 
+    async fn lookup_market_price(
+        &self,
+        query: &str,
+        language: &str,
+    ) -> Result<Option<MarketLookupView>, String> {
+        self.get_json(
+            "/market-lookup",
+            &MarketLookupHttpQuery {
+                query,
+                language,
+                hub_id: "jita",
+            },
+        )
+        .await
+    }
+
     async fn list_trade_hubs(&self) -> Result<Vec<TradeHubView>, String> {
         self.get_json("/trade-hubs", &NoQuery).await
     }
@@ -377,6 +348,13 @@ struct InventoryTypeSearchHttpQuery<'a> {
     query: &'a str,
     language: &'a str,
     limit: i64,
+}
+
+#[derive(Serialize)]
+struct MarketLookupHttpQuery<'a> {
+    query: &'a str,
+    language: &'a str,
+    hub_id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -454,18 +432,30 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_rejects_empty_query() {
-        let result =
-            lookup_market_price_with_source("   ".to_string(), MarketSource::Fixture).await;
+        let state = ReadApiState::default();
+        let result = lookup_market_price_with_state(
+            &state,
+            "   ".to_string(),
+            "en-US".to_string(),
+            MarketSource::Fixture,
+        )
+        .await;
         assert_eq!(result.unwrap_err(), "Item query is required");
     }
 
     #[tokio::test]
     async fn fixture_source_returns_mvp_views_without_network() {
+        let state = ReadApiState::default();
         assert_eq!(
-            lookup_market_price_with_source("Tritanium".to_string(), MarketSource::Fixture)
-                .await
-                .unwrap()
-                .item_name,
+            lookup_market_price_with_state(
+                &state,
+                "Tritanium".to_string(),
+                "en-US".to_string(),
+                MarketSource::Fixture,
+            )
+            .await
+            .unwrap()
+            .item_name,
             "Tritanium"
         );
         assert_eq!(
@@ -505,7 +495,7 @@ mod tests {
             "fixture-ready"
         );
         assert_eq!(
-            get_sync_status_with_source(MarketSource::Live(EsiClient::new("http://127.0.0.1:9")))
+            get_sync_status_with_source(MarketSource::Live)
                 .unwrap()
                 .public_market_sync,
             "live-ready"
@@ -513,7 +503,7 @@ mod tests {
 
         mark_public_market_fallback(true);
         assert_eq!(
-            get_sync_status_with_source(MarketSource::Live(EsiClient::new("http://127.0.0.1:9")))
+            get_sync_status_with_source(MarketSource::Live)
                 .unwrap()
                 .public_market_sync,
             "fixture-fallback"
@@ -542,5 +532,21 @@ mod tests {
         let error = ReadApiSourceConfig::from_env_reader(|_| None).unwrap_err();
 
         assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
+    }
+
+    #[tokio::test]
+    async fn hosted_lookup_errors_fall_back_to_fixture_data() {
+        let state = ReadApiState::default();
+        let result = lookup_market_price_with_state(
+            &state,
+            "Tritanium".to_string(),
+            "zh-CN".to_string(),
+            MarketSource::Live,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.type_id, 34);
+        assert_eq!(result.item_name, "Tritanium");
     }
 }

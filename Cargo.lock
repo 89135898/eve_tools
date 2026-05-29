@@ -1126,15 +1126,11 @@ dependencies = [
 name = "evetools-desktop"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "evetools-api",
  "evetools-domain",
- "evetools-esi",
  "evetools-worker",
  "reqwest",
- "rust_decimal",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tokio",

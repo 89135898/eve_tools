@@ -1,5 +1,5 @@
 use evetools_api::{
-    EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest,
+    EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest, MarketLookupRequest,
     SelectionCandidatesRequest, StationOrdersRequest,
 };
 use evetools_db::{
@@ -58,6 +58,27 @@ async fn read_api_exposes_catalog_and_market_queries() {
         .unwrap();
     assert_eq!(orders.len(), 2);
     assert_eq!(orders[0].type_id, 34);
+
+    let lookup = api
+        .lookup_market_price(MarketLookupRequest {
+            query: "三钛".to_string(),
+            language: "zh-CN".to_string(),
+            hub_id: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lookup.type_id, 34);
+    assert_eq!(lookup.item_name, "三钛合金");
+    assert_eq!(lookup.best_bid, "5.01");
+    assert_eq!(lookup.best_ask, "5.49");
+    assert_eq!(lookup.spread, "0.48");
+    assert_eq!(lookup.spread_percent, "9.58");
+    assert_eq!(lookup.daily_volume, 1_150_000);
+    assert_eq!(lookup.top_buy_depth, 500_000);
+    assert_eq!(lookup.top_sell_depth, 650_000);
+    assert_eq!(lookup.price_trend, "stable");
+    assert_eq!(lookup.data_quality, "fresh");
 
     let candidates = api
         .selection_candidates(SelectionCandidatesRequest {

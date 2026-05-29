@@ -36,6 +36,20 @@ async fn read_http_api_exposes_health_hubs_and_selection_candidates() {
     let hubs = json_body(hubs).await;
     assert_eq!(hubs.as_array().unwrap()[0]["hub_id"], "jita");
 
+    let lookup = router
+        .clone()
+        .oneshot(request(
+            "/market-lookup?query=%E4%B8%89%E9%92%9B&language=zh-CN",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lookup.status(), 200);
+    let lookup = json_body(lookup).await;
+    assert_eq!(lookup["type_id"], 34);
+    assert_eq!(lookup["item_name"], "三钛合金");
+    assert_eq!(lookup["best_bid"], "5.01");
+    assert_eq!(lookup["best_ask"], "5.49");
+
     let candidates = router
         .oneshot(request(
             "/selection-candidates?language=zh-CN&hub_ids=jita&limit_per_hub=10",

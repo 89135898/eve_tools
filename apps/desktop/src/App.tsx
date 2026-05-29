@@ -37,7 +37,7 @@ function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus):
 }
 
 async function runRefreshRequest(query: string, language: string, selectedHubId: string): Promise<RefreshResult> {
-  const lookupResult = await lookupMarketPrice(query);
+  const lookupResult = await lookupMarketPrice(query, language);
   const lookupStatus = await getSyncStatus();
   const hubResult = await listTradeHubs();
   const hubIds = selectedHubId === "all" ? [] : [selectedHubId];

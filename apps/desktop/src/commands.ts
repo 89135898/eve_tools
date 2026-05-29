@@ -62,8 +62,8 @@ export type SyncStatus = {
   data_source: string;
 };
 
-export function lookupMarketPrice(query: string): Promise<MarketLookupView> {
-  return invoke<MarketLookupView>("lookup_market_price", { query });
+export function lookupMarketPrice(query: string, language: string): Promise<MarketLookupView> {
+  return invoke<MarketLookupView>("lookup_market_price", { query, language });
 }
 
 export function listSelectionCandidates(
