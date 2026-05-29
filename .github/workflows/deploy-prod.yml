@@ -1,0 +1,188 @@
+name: Deploy production backend
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.82.0"
+  ARTIFACT_NAME: evetools-${{ github.sha }}-linux-x86_64.tar.gz
+  AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN != '' && vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+  DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET != '' && vars.DEPLOY_BUCKET || secrets.DEPLOY_BUCKET }}
+  EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID != '' && vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
+
+jobs:
+  deploy:
+    name: Build and deploy backend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in AWS_REGION AWS_ROLE_ARN DEPLOY_BUCKET EC2_INSTANCE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is required as a GitHub repository variable or secret"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Cargo registry and build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run backend tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test \
+            -p evetools-domain \
+            -p evetools-esi \
+            -p evetools-db \
+            -p evetools-api \
+            -p evetools-http-api \
+            -p evetools-worker
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p evetools-http-api --bin evetools-http-api
+          cargo build --release -p evetools-worker --bin sync-public-market-region
+
+      - name: Package release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/bin
+          cp target/release/evetools-http-api dist/bin/evetools-http-api
+          cp target/release/sync-public-market-region dist/bin/sync-public-market-region
+          tar -C dist -czf "${ARTIFACT_NAME}" bin
+          tar -tzf "${ARTIFACT_NAME}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: evetools-github-actions-deploy
+
+      - name: Upload release artifact to S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws s3 cp \
+            "${ARTIFACT_NAME}" \
+            "s3://${DEPLOY_BUCKET}/releases/${GITHUB_SHA}/${ARTIFACT_NAME}" \
+            --only-show-errors
+
+      - name: Activate release through SSM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssm_script="$(cat <<REMOTE
+          set -euo pipefail
+
+          release_sha="${GITHUB_SHA}"
+          artifact_name="${ARTIFACT_NAME}"
+          deploy_bucket="${DEPLOY_BUCKET}"
+          release_root="/opt/evetools/releases"
+          release_dir="\${release_root}/\${release_sha}"
+          archive_path="/tmp/\${artifact_name}"
+
+          sudo mkdir -p "\${release_dir}"
+          aws s3 cp "s3://\${deploy_bucket}/releases/\${release_sha}/\${artifact_name}" "\${archive_path}" --only-show-errors
+          sudo tar -xzf "\${archive_path}" -C "\${release_dir}"
+          sudo chmod +x "\${release_dir}/bin/evetools-http-api" "\${release_dir}/bin/sync-public-market-region"
+          sudo ln -sfn "\${release_dir}" /opt/evetools/current
+          sudo systemctl daemon-reload
+          sudo systemctl restart evetools-http-api.service
+          sudo systemctl try-restart evetools-market-sync.timer || true
+          REMOTE
+          )"
+
+          jq -n --arg script "$ssm_script" '{commands: [$script]}' > ssm-parameters.json
+
+          command_id="$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --instance-ids "${EC2_INSTANCE_ID}" \
+            --comment "Deploy EveTools ${GITHUB_SHA}" \
+            --parameters file://ssm-parameters.json \
+            --query 'Command.CommandId' \
+            --output text)"
+
+          echo "SSM command id: ${command_id}"
+
+          for attempt in $(seq 1 60); do
+            status="$(aws ssm get-command-invocation \
+              --command-id "${command_id}" \
+              --instance-id "${EC2_INSTANCE_ID}" \
+              --query 'Status' \
+              --output text 2>/dev/null || true)"
+
+            echo "SSM status attempt ${attempt}: ${status}"
+
+            case "$status" in
+              Success)
+                aws ssm get-command-invocation \
+                  --command-id "${command_id}" \
+                  --instance-id "${EC2_INSTANCE_ID}" \
+                  --query 'StandardOutputContent' \
+                  --output text
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                aws ssm get-command-invocation \
+                  --command-id "${command_id}" \
+                  --instance-id "${EC2_INSTANCE_ID}" \
+                  --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+                  --output json
+                exit 1
+                ;;
+              Pending|InProgress|Delayed|"")
+                sleep 10
+                ;;
+              *)
+                sleep 10
+                ;;
+            esac
+          done
+
+          echo "::error::SSM command did not finish within 10 minutes"
+          aws ssm get-command-invocation \
+            --command-id "${command_id}" \
+            --instance-id "${EC2_INSTANCE_ID}" \
+            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json || true
+          exit 1
