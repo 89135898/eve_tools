@@ -110,7 +110,7 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          scp -i ~/.ssh/id_ed25519 "${ARTIFACT_NAME}" "${SSH_USER}@${SSH_HOST}:/tmp/${ARTIFACT_NAME}"
+          scp "${ARTIFACT_NAME}" "${SSH_USER}@${SSH_HOST}:/tmp/${ARTIFACT_NAME}"
 
       - name: Activate release over SSH
         shell: bash
@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          ssh "${SSH_USER}@${SSH_HOST}" \
             "RELEASE_SHA='${GITHUB_SHA}' ARTIFACT_NAME='${ARTIFACT_NAME}' bash -s" <<'REMOTE'
           set -euo pipefail
 
