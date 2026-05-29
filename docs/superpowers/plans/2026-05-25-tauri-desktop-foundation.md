@@ -1,5 +1,7 @@
 # Tauri Desktop Foundation Implementation Plan
 
+> Status update, 2026-05-29: this is a historical implementation plan for the first fixture-backed desktop slice. The current app has since added Supabase/Postgres catalog and market snapshots, hosted HTTP reads, public market sync, EVE SSO, authenticated character order sync, and real Order Monitor rows. Use `README.md` and the current architecture/design specs for the up-to-date runtime shape.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first runnable desktop slice: Tauri 2 shell, React UI, Rust workspace crates, tested domain calculations, and fixture-backed commands for price lookup, selection discovery, and order monitoring.

@@ -1,5 +1,7 @@
 # Authenticated Order Monitor Implementation Plan
 
+> Status update, 2026-05-29: this implementation slice has been merged into `wangjiazhen`. The current runtime behavior is documented in `README.md`; this file remains as the task-level implementation plan and audit trail.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add real EVE SSO authorization and authenticated character-order synchronization so Order Monitor can display advisory repricing rows for the user's open market orders.

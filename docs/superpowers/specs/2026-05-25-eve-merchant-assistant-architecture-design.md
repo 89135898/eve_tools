@@ -8,16 +8,18 @@ Build a personal EVE Online merchant assistant focused first on a Jita 4-4 stati
 
 This document defines the architecture baseline. The current MVP product scope is defined in `docs/superpowers/specs/2026-05-25-jita-two-board-station-trading-mvp-design.md`.
 
+Status update, 2026-05-29: the implemented architecture has moved past the original local-only storage sketch. Public market and catalog reads now use a hosted HTTP API backed by Supabase/Postgres snapshots. The desktop app still owns the Tauri shell and local/private EVE SSO flow, but React does not receive tokens or database credentials.
+
 ## Current Scope Baseline
 
 The first phase targets a Jita station trader who wants help finding tradeable items and monitoring active orders, not automated trading.
 
 Initial assumptions:
 
-- The app is a local single-user tool.
-- The first market focus is Jita 4-4, using public The Forge/Jita market data where needed.
+- The app is desktop-first and can use hosted read APIs for catalog and public market data.
+- The first market focus is Jita 4-4, with Selection Discovery expanded to the major NPC hubs: Jita, Amarr, Dodixie, Rens, and Hek.
 - The UI is a Tauri desktop app with a React/Vite interface.
-- The backend owns market data sync, EVE SSO for private order monitoring, ESI access, local storage, synchronization, and analysis.
+- Rust services own market data sync, EVE SSO for private order monitoring, ESI access, Postgres persistence, synchronization, and analysis.
 - The system provides recommendations and diagnostics only. It does not place, modify, or cancel EVE orders.
 - Market price lookup is a shared capability used by both selection discovery and order monitoring.
 
@@ -28,13 +30,14 @@ Use a Tauri desktop app with a Rust core and a TypeScript UI:
 - Frontend: React, Vite, TanStack Query, TanStack Table
 - Desktop shell: Tauri 2
 - Backend/core: Rust, Tokio
-- Storage: SQLite for MVP, with schema discipline that allows later PostgreSQL migration
+- Storage: Supabase/Postgres with SQLx migrations and repositories
 - Database access: SQLx
 - HTTP client: reqwest
+- Hosted read API: Axum
 - Serialization and validation: serde plus explicit domain validation
 - Money math: rust_decimal or integer minor-unit modeling where appropriate
-- Scheduling: simple Tokio-based in-process scheduler for MVP, with a clear path to a durable queue if job reliability requires it
-- Deployment shape: local desktop development first; a Web/server adapter can be added later if remote access becomes useful
+- Scheduling: external scheduler or manual worker CLI invoking Rust worker entrypoints
+- Deployment shape: desktop client plus hosted HTTP API/worker/admin processes for production data paths
 
 The primary reason for this stack is a stable, strongly typed Rust core for ESI sync, token handling, snapshots, and trading calculations while keeping the UI fast to build in React. TypeScript remains the UI language only; backend business logic should live in Rust. Tauri command handlers should be thin adapters over `crates/domain`, `crates/esi`, `crates/db`, and `crates/worker`.
 
@@ -47,13 +50,13 @@ Tauri Desktop App
         |
 React/Vite UI
         |
-Tauri Commands
+Tauri Commands + hosted HTTP API
         |
-Application Services
+Application Services / Read API
         |
-Domain Engine
+Domain Engine + Worker
         |
-Database
+Supabase/Postgres
         |
 Background Sync
         |
@@ -67,6 +70,10 @@ crates/
   domain/           Spread, liquidity, profitability, repricing, urgency, ranking
   esi/              Public and authenticated ESI clients, response validation, cache metadata
   db/               SQLx schema access, migrations, repositories
+  api/              Read-side application API over catalog and market repositories
+  http-api/         Axum hosted adapter for read routes and health
+  catalog/          SDE catalog import/query service
+  sde/              SDE archive discovery and parsing
   worker/           Sync orchestration and scheduled jobs
 apps/
   desktop/          Tauri shell, React UI, command handlers, SSO callback adapter
@@ -77,12 +84,13 @@ The most important rule is that React must not own business calculations. The fr
 ## Data Flow
 
 1. The user opens the desktop app.
-2. The backend resolves item metadata and public Jita market data for price lookup and selection discovery.
-3. Public ESI responses are validated and stored as snapshots.
-4. If order monitoring is used, the backend starts EVE SSO and stores refresh credentials locally after authorization.
-5. Authenticated sync jobs pull character orders and relevant Jita market data from ESI.
-6. Domain services compute price state, item opportunity, order urgency, risk, and suggested actions.
-7. The UI invokes Tauri commands to read analyzed views from the Rust core.
+2. Public market workers validate ESI responses and store latest successful snapshots in Supabase/Postgres.
+3. The hosted HTTP API resolves catalog metadata, market lookup, trade hubs, selection candidates, and sync health from those snapshots.
+4. The desktop app calls hosted read routes through `EVETOOLS_API_BASE_URL` for public data.
+5. If order monitoring is used in local/private desktop mode, Tauri Rust starts EVE SSO with PKCE and stores refresh credentials in Rust-owned Postgres tables after authorization.
+6. Authenticated sync jobs pull character orders from ESI and persist character order snapshots.
+7. Domain services compute price state, item opportunity, order urgency, risk, and suggested actions.
+8. The UI invokes Tauri commands and renders prepared view models; React does not handle ESI tokens.
 
 The app should prefer snapshot-based analysis over purely live API reads. Snapshots make it possible to reason about price drift, liquidity changes, order age, filled quantity, stale items, and trend changes.
 
@@ -144,31 +152,27 @@ Domain code must be deterministic and testable without network or database acces
 
 Responsibilities:
 
-- Store authorized character metadata and encrypted or locally protected refresh credentials where practical.
-- Store candidate pools, watchlists, fee profiles, and app settings.
+- Store authorized character metadata and refresh credentials in Rust-owned tables; do not expose them to React/WebView state.
+- Store catalog metadata, localizations, trade hubs, public market sync runs, market order snapshots, character order sync runs, and character order snapshots.
+- Store future candidate pools, watchlists, fee profiles, and app settings when those product surfaces are added.
 - Store personal order snapshots.
-- Store market order snapshots for relevant Jita items.
+- Store market order snapshots for configured NPC trade hubs.
 - Store sync attempts, cache metadata, and failure reasons.
 
 ## Data Model Direction
 
-Exact tables will be refined later, but the schema should include these concepts:
+The current schema is Postgres-first and includes these implemented concepts:
 
-- `characters`
-- `auth_tokens`
-- `candidate_items`
-- `watchlist_items`
-- `fee_profiles`
-- `price_lookup_history`
-- `character_order_snapshots`
+- catalog entity and localization tables
+- `trade_hubs`
+- `market_sync_runs`
 - `market_order_snapshots`
-- `market_history_snapshots`
-- `item_types`
-- `stations`
-- `sync_runs`
-- `analysis_snapshots`
+- `characters`
+- `character_auth_tokens`
+- `character_order_sync_runs`
+- `character_order_snapshots`
 
-The schema should avoid storing only the latest state. Historical snapshots are needed for future analysis such as order aging, fill speed, price movement, and stale inventory detection.
+Future product tables can add watchlists, fee profiles, wallet/transaction views, market history snapshots, and analysis snapshots. The schema should avoid storing only the latest state. Historical snapshots are needed for future analysis such as order aging, fill speed, price movement, and stale inventory detection.
 
 ## Reliability Rules
 
@@ -199,22 +203,22 @@ These items are intentionally left for later product design:
 - Exact first set of order recommendations.
 - Fee model defaults and user overrides.
 - How to estimate acquisition cost for sell orders.
-- Whether to support multiple characters in the first release.
-- Whether sync should be manual-only or scheduled in MVP.
+- Whether to support full multi-character switching in the first release.
+- Whether authenticated character order sync should remain manual-only or become scheduled.
 - Whether to add a separate Web/server adapter later.
-- Whether to migrate from SQLite to PostgreSQL.
+- Whether to move local/private desktop SSO token storage into a controlled hosted backend before distributing to untrusted users.
 - Whether to introduce a durable queue for background jobs.
-- Whether to rewrite selected modules in Rust after the workflow is proven.
 
-## First Implementation Direction
+## Current Implementation Status
 
-When implementation begins, start with the smallest vertical slice:
+The initial vertical slices are now implemented as:
 
-1. Create the monorepo structure.
-2. Add `crates/domain` with tested price-state, spread, liquidity, and repricing primitives.
-3. Add stubbed Tauri commands that return fixture-based market lookup, selection, and order-monitor views.
-4. Add the desktop UI shell against those commands.
-5. Add public ESI market sync for price lookup and selection discovery.
-6. Add EVE SSO and authenticated character-order sync after the public analysis workflow is visible.
+1. Rust workspace crates for domain, ESI, DB, catalog, read API, HTTP API, worker, and desktop adapter.
+2. Tested domain calculations for market lookup, selection scoring, and advisory repricing.
+3. Supabase/Postgres catalog and market snapshot persistence via SQLx migrations.
+4. Public ESI market sync worker for configured NPC trade hubs.
+5. Hosted HTTP read API for catalog, market lookup, selection candidates, station orders, sync health, and authenticated order monitor rows.
+6. Tauri desktop UI wired to hosted reads plus Rust-owned EVE SSO, token storage, character order sync, and Order Monitor views.
+7. Explicit fixture mode for local development and deterministic tests only.
 
-This sequence lets the project validate the merchant workflow before spending too much time on integration details.
+Next architecture work should focus on hardening production secret boundaries, hosted authenticated sync for multi-user distribution, richer portfolio data, and operational alerting.

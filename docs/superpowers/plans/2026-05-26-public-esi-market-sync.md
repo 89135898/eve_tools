@@ -1,5 +1,7 @@
 # Public ESI Market Sync Implementation Plan
 
+> Status update, 2026-05-29: this is a historical implementation plan for the first live public ESI slice. The current implementation uses Supabase/Postgres snapshots, a hosted HTTP read API, multi-hub Selection Discovery, strict live-mode errors instead of implicit fixture fallback, and a separate completed EVE SSO authenticated Order Monitor path. Use `README.md` and the current specs for the up-to-date runtime shape.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first live public ESI vertical slice for Jita market price lookup and selection discovery while preserving deterministic fixture fallback.

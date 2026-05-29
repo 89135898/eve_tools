@@ -8,6 +8,8 @@ Replace the fixed Selection Discovery seed list with automatic station-trading r
 
 The first version should discover station-trading opportunities from market state itself. It should not require a manually maintained candidate pool, and it should not attempt player-structure markets or cross-station hauling arbitrage.
 
+Status update, 2026-05-29: the implemented path uses Supabase/Postgres market snapshots, a worker CLI for public ESI sync, and a hosted read API. The old fixed seed list is no longer a product input in live mode, and live mode must not silently fall back to fixture rows.
+
 ## Confirmed Decisions
 
 - Selection Discovery recommends station-internal trading opportunities, not hauling routes.
@@ -98,18 +100,18 @@ Suggested layers:
 ```text
 React UI
   |
-Tauri commands
+Tauri commands / hosted HTTP API
   |
-Discovery application service
+Read API over Supabase/Postgres snapshots
   |
 Public market sync worker
   |
-ESI client + SQLite repositories
+ESI client + Postgres repositories
   |
 Domain ranking engine
 ```
 
-The Tauri command should request recommendations, not run the synchronization logic inline. If cached recommendations are fresh enough, return them immediately. If data is missing or stale, trigger a refresh and return either a loading state, fixture fallback, or the latest cached result with stale status.
+The desktop read path requests recommendations from the hosted read API rather than running synchronization inline. Workers refresh snapshots out of band through `sync-public-market-region`. If data is missing or stale, live mode should report a clear live-data error or stale/degraded state; fixture rows are only for explicit fixture mode.
 
 ## Fetch Strategy
 
@@ -136,23 +138,22 @@ The worker should be built around ESI cache behavior and rate limits:
 - Store sync status so refreshes are single-flight per region. Multiple UI requests should join or reuse the same refresh rather than start duplicate region scans.
 - Treat partial region fetch failure as stale or degraded data, not as a reason to mix incomplete pages into a fresh recommendation set.
 - Record page counts and page failures so the UI can show degraded sync state later.
-- Keep fixture mode available for deterministic tests and offline development.
+- Keep fixture mode available for deterministic tests and offline development, but never use fixture rows as an implicit live-mode fallback.
 
-The first version does not need background scheduling, but the service boundary should allow adding scheduled refresh later.
+The first production version uses an external scheduler or manual CLI invocation. The worker boundary should remain independent of any specific scheduler.
 
 ## Storage Model Direction
 
-The design needs SQLite persistence because full region order scans are too expensive to repeat for every UI refresh.
+The implemented design uses Supabase/Postgres persistence because full region order scans are too expensive to repeat for every UI refresh and the desktop now reads through a hosted API.
 
-Suggested tables:
+Implemented tables for this slice:
 
 - `trade_hubs`
 - `market_sync_runs`
 - `market_order_snapshots`
-- `market_history_snapshots`
 - `item_metadata`
-- `selection_recommendation_snapshots`
-- `app_settings`
+
+`item_metadata` is supplied by the catalog tables and localization tables. Selection Discovery recommendations are currently computed from latest successful order snapshots at read time rather than persisted as `selection_recommendation_snapshots`.
 
 Minimum fields:
 
@@ -192,7 +193,7 @@ Minimum fields:
 - `min_volume`
 - `range`
 
-### `market_history_snapshots`
+### Future `market_history_snapshots`
 
 - `region_id`
 - `type_id`
@@ -204,7 +205,7 @@ Minimum fields:
 - `volume`
 - `fetched_at`
 
-### `selection_recommendation_snapshots`
+### Future `selection_recommendation_snapshots`
 
 - `sync_run_id`
 - `hub_id`
@@ -224,7 +225,7 @@ Minimum fields:
 - `last_synced_at`
 - `data_quality`
 
-The first implementation may start with a narrower schema, but these concepts should not be collapsed into fixture-only view construction.
+The first implementation uses a narrower schema, but the product behavior is snapshot-backed rather than fixture-only view construction.
 
 ## Domain Model Changes
 
@@ -340,12 +341,13 @@ Expected error classes:
 - ESI market-history fetch failure
 - partial page fetch failure
 - static metadata missing for a type ID
-- SQLite read or write failure
+- Postgres read or write failure
+- hosted API unavailable or not configured
 - sync already running
 
 Behavior:
 
-- If all live order fetches fail, return fixture fallback in fixture-compatible development mode or a live error state in strict live mode.
+- If all live order fetches fail, return fixture rows only in explicit fixture mode; strict live mode returns a live error state.
 - If one region fails and others succeed, return successful hubs and mark failed hubs as degraded or stale.
 - If metadata is missing, keep the type ID in the recommendation with a fallback item name like `Type 34`, and mark a metadata reason internally.
 - Do not silently turn item-not-found or missing metadata into unrelated fixture recommendations.
@@ -372,12 +374,12 @@ DB tests:
 
 - sync runs persist status and page counts
 - order snapshots can be replaced by sync run
-- recommendation snapshots can be queried by hub and score
+- selection recommendations can be queried or computed by hub and score from latest successful snapshots
 
 Desktop command tests:
 
 - fixture source still returns deterministic rows
-- live service returns hub-aware recommendations from mocked repositories or mocked ESI
+- live service returns hub-aware recommendations from mocked repositories or hosted API responses
 - partial hub failure returns degraded status without losing successful hubs
 
 Frontend tests or type checks:
@@ -388,12 +390,20 @@ Frontend tests or type checks:
 
 ## Migration From Current Implementation
 
-Current behavior:
+Previous behavior:
 
-- `SELECTION_SEED_TYPES` hard-codes four minerals.
-- `list_selection_candidates` fetches per seed item.
-- `summarize_jita_market` filters only Jita 4-4.
-- Selection Discovery rows do not include hub identity.
+- `SELECTION_SEED_TYPES` hard-coded four minerals.
+- `list_selection_candidates` fetched per seed item.
+- `summarize_jita_market` filtered only Jita 4-4.
+- Selection Discovery rows did not include hub identity.
+
+Current implemented behavior:
+
+- Major NPC trade hubs are configured in Rust.
+- Workers fetch region order pages and filter them to configured station IDs.
+- Latest successful public snapshots are stored in Supabase/Postgres.
+- `list_selection_candidates` reads snapshot-backed, hub-aware recommendation rows through the hosted API path.
+- Fixture rows remain available only through explicit fixture source selection.
 
 Target behavior:
 
@@ -405,25 +415,24 @@ Target behavior:
 - Enrich top-ranked item groups with history.
 - Return hub-aware recommendation rows.
 
-This can be implemented incrementally while keeping fixture fallback and the existing UI table available.
+This can be implemented incrementally while keeping explicit fixture mode and the existing UI table available.
 
 ## Out of Scope
 
 - Player-structure markets such as Perimeter.
 - Cross-station hauling arbitrage.
-- Authenticated character-order monitoring.
+- Authenticated character-order monitoring internals; that is covered by the authenticated order monitor design.
 - Automated order placement, modification, or cancellation.
 - Full all-region market database.
-- Background daemon scheduling beyond the service boundary.
 - Perfect SDE coverage for industry, dogma, blueprints, or universe geography.
 
 ## Open Implementation Choices
 
-These choices can be resolved in the implementation plan:
+These choices remain open after the first implementation:
 
-- Whether SQLite schema lands before or together with the discovery service.
-- Whether the first static metadata source is a small bundled fixture, ESI type lookup cache, or SDE import subset.
 - The exact preselection and final recommendation limits.
-- Whether the UI first uses a hub filter dropdown or grouped sections.
+- Whether to persist recommendation snapshots instead of computing them at read time.
+- Whether to add market-history enrichment to the current order-book-only ranking.
+- Whether the UI should add grouped sections in addition to the current hub filter.
 
 The design requires that these choices keep the product behavior candidate-free from the user's perspective.

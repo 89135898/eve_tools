@@ -10,6 +10,8 @@ The goal is to make market data refreshes safe to run unattended in a hosted env
 
 Monitoring and alert delivery are intentionally out of scope for this slice. The system should expose enough health data for a later alerting layer, but it should not integrate Slack, email, PagerDuty, Grafana, Better Stack, or any cloud-specific alerting service yet.
 
+Status update, 2026-05-29: public market production sync remains server-side, while local/private desktop SSO order sync is now implemented separately. This document describes the public market operations layer and its secret boundaries; it should not be read as forbidding the local/private Tauri Rust process from using SSO/database configuration for authenticated order monitoring.
+
 ## Confirmed Scope
 
 - Keep `evetools-http-api` as a read-oriented hosted service.
@@ -26,7 +28,7 @@ Monitoring and alert delivery are intentionally out of scope for this slice. The
 - A web operations dashboard.
 - Kubernetes-specific deployment manifests.
 - Queue systems such as Kafka, RabbitMQ, or Redis.
-- Authenticated EVE SSO and character order synchronization.
+- Hosted authenticated order synchronization for untrusted multi-user desktop distribution. Local/private desktop SSO order sync is covered by the authenticated order monitor design.
 - Replacing Supabase/Postgres.
 - Moving worker scheduling into the desktop app.
 
@@ -40,6 +42,7 @@ The current implementation already has these production-relevant pieces:
 - `sync-public-market-region` CLI
 - `EveToolsReadApi`
 - hosted HTTP routes for market lookup, station orders, trade hubs, and selection candidates
+- hosted HTTP routes for readiness, sync health, and authenticated order monitor read views
 - desktop usage of `EVETOOLS_API_BASE_URL`
 
 The current gap is not the data product path. The gap is operational control: sync runs can be started manually or by a scheduler, but there is no durable region lock, no stale-data health classification, no readiness endpoint, no consecutive failure view, and no standard production scheduling contract.
@@ -239,7 +242,9 @@ Use separate database credentials by environment role:
 - Worker: read catalog, write market sync runs, write order snapshots, upsert trade hubs.
 - Catalog admin: write catalog tables and run SDE import.
 
-The desktop app must only receive `EVETOOLS_API_BASE_URL`. It must never receive `EVETOOLS_DATABASE_URL`.
+For distributed production desktop builds, the public read path should only receive `EVETOOLS_API_BASE_URL`; public market sync and catalog writes stay in server-side worker/admin environments. Local/private desktop SSO order sync may configure `EVETOOLS_DATABASE_URL`, `EVETOOLS_SSO_CLIENT_ID`, and `EVETOOLS_SSO_REDIRECT_URI` in the Tauri Rust process, but those values must not be exposed to React, WebView storage, logs, screenshots, or untrusted release packages.
+
+If EveTools is distributed to untrusted users, move SSO token persistence and authenticated order sync into a controlled backend and keep the desktop on hosted API credentials only.
 
 ## Testing Strategy
 
@@ -266,7 +271,7 @@ HTTP API tests should cover:
 - `/sync-health` returns enabled hubs in sort order
 - stale or missing market sync does not break `/catalog/status`
 
-Desktop tests do not need to change for this slice unless the UI later shows sync health.
+Desktop tests should cover hosted API configuration, backend connection status, and strict live-mode errors where the UI consumes readiness or sync-health status.
 
 ## Implementation Order
 
