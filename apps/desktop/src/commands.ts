@@ -62,6 +62,20 @@ export type SyncStatus = {
   data_source: string;
 };
 
+export type BackendProbeView = {
+  path: string;
+  status: string;
+  http_status: number | null;
+  message: string | null;
+};
+
+export type BackendConnectionStatusView = {
+  configured: boolean;
+  base_url: string | null;
+  overall_status: string;
+  probes: BackendProbeView[];
+};
+
 export function lookupMarketPrice(query: string, language: string): Promise<MarketLookupView> {
   return invoke<MarketLookupView>("lookup_market_price", { query, language });
 }
@@ -83,6 +97,10 @@ export function listOrderMonitorItems(): Promise<OrderMonitorView[]> {
 
 export function getSyncStatus(): Promise<SyncStatus> {
   return invoke<SyncStatus>("get_sync_status");
+}
+
+export function getBackendConnectionStatus(): Promise<BackendConnectionStatusView> {
+  return invoke<BackendConnectionStatusView>("get_backend_connection_status");
 }
 
 export type CatalogStatus = {

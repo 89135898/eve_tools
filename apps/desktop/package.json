@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
+    "dev": "node scripts/run-with-env.mjs --env .env.production --env .env.local -- tauri dev",
+    "build": "node scripts/run-with-env.mjs --env .env.production -- tauri build",
     "typecheck": "tsc --noEmit",
+    "test:env": "node --test scripts/run-with-env.test.mjs",
     "vite:dev": "vite --host 127.0.0.1 --port 1420",
     "vite:build": "vite build"
   },

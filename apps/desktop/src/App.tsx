@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  getBackendConnectionStatus,
   getSyncStatus,
   listOrderMonitorItems,
   listSelectionCandidates,
   listTradeHubs,
   lookupMarketPrice,
+  type BackendConnectionStatusView,
   type MarketLookupView,
   type OrderMonitorView,
   type SelectionCandidateView,
@@ -25,33 +27,28 @@ type RefreshResult = {
 
 let refreshRequestInFlight: Promise<RefreshResult> | null = null;
 
-function mergeSyncStatus(lookupStatus: SyncStatus, candidateStatus: SyncStatus): SyncStatus {
-  if (lookupStatus.public_market_sync === "fixture-fallback" || candidateStatus.public_market_sync === "fixture-fallback") {
-    return {
-      ...candidateStatus,
-      public_market_sync: "fixture-fallback",
-      data_source: "fixture"
-    };
-  }
-  return candidateStatus ?? lookupStatus;
-}
-
 async function runRefreshRequest(query: string, language: string, selectedHubId: string): Promise<RefreshResult> {
   const lookupResult = await lookupMarketPrice(query, language);
-  const lookupStatus = await getSyncStatus();
   const hubResult = await listTradeHubs();
   const hubIds = selectedHubId === "all" ? [] : [selectedHubId];
   const candidateResult = await listSelectionCandidates(language, hubIds);
   const candidateStatus = await getSyncStatus();
   const orderResult = await listOrderMonitorItems();
-  const statusResult = mergeSyncStatus(lookupStatus, candidateStatus);
   return {
     lookup: lookupResult,
     candidates: candidateResult,
     hubs: hubResult,
     orders: orderResult,
-    syncStatus: statusResult
+    syncStatus: candidateStatus
   };
+}
+
+async function safeGetBackendConnectionStatus(): Promise<BackendConnectionStatusView | null> {
+  try {
+    return await getBackendConnectionStatus();
+  } catch {
+    return null;
+  }
 }
 
 function runSingleFlightRefresh(query: string, language: string, selectedHubId: string): Promise<RefreshResult> {
@@ -73,6 +70,7 @@ export default function App() {
   const [selectedHubId, setSelectedHubId] = useState("all");
   const [orders, setOrders] = useState<OrderMonitorView[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [backendStatus, setBackendStatus] = useState<BackendConnectionStatusView | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
@@ -95,6 +93,12 @@ export default function App() {
     refreshInFlight.current = true;
     setLoadState("loading");
     setError(null);
+    const latestBackendStatus = await safeGetBackendConnectionStatus();
+    if (!mountedRef.current) {
+      refreshInFlight.current = false;
+      return;
+    }
+    setBackendStatus(latestBackendStatus);
     try {
       const result = await runSingleFlightRefresh(query, language, selectedHubId);
       if (!mountedRef.current) {
@@ -159,12 +163,27 @@ export default function App() {
       </header>
 
       <section className="status-row">
+        <StatusCard
+          label={t("statusCards.backendApi")}
+          value={code("codes.backendStatus", backendStatus?.overall_status)}
+          detail={backendStatus?.base_url ?? undefined}
+        />
         <StatusCard label={t("statusCards.publicMarketSync")} value={code("codes.syncStatus", syncStatus?.public_market_sync)} />
         <StatusCard label={t("statusCards.orderSync")} value={code("codes.syncStatus", syncStatus?.authenticated_order_sync)} />
         <StatusCard label={t("statusCards.dataSource")} value={code("codes.dataSource", syncStatus?.data_source)} />
       </section>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {backendStatus && backendStatus.overall_status !== "ready" && (
+        <section className="backend-probes" aria-label={t("statusCards.backendApi")}>
+          {backendStatus.probes.map((probe) => (
+            <span key={probe.path}>
+              {probe.path}: {code("codes.backendProbe", probe.status)}
+            </span>
+          ))}
+        </section>
+      )}
 
       <section className="panel lookup-panel">
         <div className="panel-header">
@@ -280,11 +299,12 @@ export default function App() {
   );
 }
 
-function StatusCard({ label, value }: { label: string; value: string }) {
+function StatusCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
     <div className="status-card">
       <span>{label}</span>
       <strong>{value}</strong>
+      {detail && <small>{detail}</small>}
     </div>
   );
 }

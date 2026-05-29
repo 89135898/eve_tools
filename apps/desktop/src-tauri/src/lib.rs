@@ -7,18 +7,17 @@ use evetools_domain::fixtures::{
 };
 use evetools_domain::{MarketLookupView, OrderMonitorView, SelectionCandidateView};
 use evetools_worker::{
-    default_trade_hubs_as_db_records, fixture_fallback_sync_status, fixture_sync_status,
-    live_sync_status, SyncStatus,
+    default_trade_hubs_as_db_records, fixture_sync_status, live_sync_status, SyncStatus,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::OnceCell;
 
 const DEFAULT_SELECTION_LIMIT: i64 = 25;
 const API_BASE_URL_ENV: &str = "EVETOOLS_API_BASE_URL";
-
-static PUBLIC_MARKET_USED_FALLBACK: AtomicBool = AtomicBool::new(false);
+const BUILD_TIME_API_BASE_URL: Option<&str> = option_env!("EVETOOLS_API_BASE_URL");
+const BACKEND_PROBE_PATHS: [&str; 3] = ["/health", "/ready", "/sync-health"];
 
 #[derive(Clone, Debug)]
 enum MarketSource {
@@ -37,14 +36,6 @@ impl MarketSource {
     fn is_fixture(&self) -> bool {
         matches!(self, Self::Fixture)
     }
-}
-
-fn mark_public_market_fallback(used_fallback: bool) {
-    PUBLIC_MARKET_USED_FALLBACK.store(used_fallback, Ordering::Relaxed);
-}
-
-fn public_market_used_fallback() -> bool {
-    PUBLIC_MARKET_USED_FALLBACK.load(Ordering::Relaxed)
 }
 
 #[tauri::command]
@@ -68,22 +59,10 @@ async fn lookup_market_price_with_state(
     }
 
     match source {
-        MarketSource::Fixture => {
-            mark_public_market_fallback(false);
-            Ok(fixture_market_lookup(trimmed))
-        }
-        MarketSource::Live => {
-            match lookup_market_price_from_hosted(state, trimmed, &language).await {
-                Ok(Some(view)) => {
-                    mark_public_market_fallback(false);
-                    Ok(view)
-                }
-                Ok(None) | Err(_) => {
-                    mark_public_market_fallback(true);
-                    Ok(fixture_market_lookup(trimmed))
-                }
-            }
-        }
+        MarketSource::Fixture => Ok(fixture_market_lookup(trimmed)),
+        MarketSource::Live => lookup_market_price_from_hosted(state, trimmed, &language)
+            .await?
+            .ok_or_else(|| format!("No market data found for {trimmed}")),
     }
 }
 
@@ -105,34 +84,27 @@ async fn list_selection_candidates(
     language: String,
     hub_ids: Vec<String>,
 ) -> Result<Vec<SelectionCandidateView>, String> {
-    if MarketSource::from_env().is_fixture() {
-        return list_selection_candidates_with_source(MarketSource::Fixture).await;
-    }
-
-    match list_selection_candidates_from_snapshots(&state, language, hub_ids).await {
-        Ok(candidates) if !candidates.is_empty() => {
-            mark_public_market_fallback(false);
-            Ok(candidates)
-        }
-        Ok(_) | Err(_) => {
-            mark_public_market_fallback(true);
-            Ok(fixture_selection_candidates())
-        }
-    }
+    list_selection_candidates_with_state(&state, language, hub_ids, MarketSource::from_env()).await
 }
 
 async fn list_selection_candidates_with_source(
     source: MarketSource,
 ) -> Result<Vec<SelectionCandidateView>, String> {
     match source {
-        MarketSource::Fixture => {
-            mark_public_market_fallback(false);
-            Ok(fixture_selection_candidates())
-        }
-        MarketSource::Live => {
-            mark_public_market_fallback(true);
-            Ok(fixture_selection_candidates())
-        }
+        MarketSource::Fixture => Ok(fixture_selection_candidates()),
+        MarketSource::Live => Err("live selection candidates require hosted API state".to_string()),
+    }
+}
+
+async fn list_selection_candidates_with_state(
+    state: &ReadApiState,
+    language: String,
+    hub_ids: Vec<String>,
+    source: MarketSource,
+) -> Result<Vec<SelectionCandidateView>, String> {
+    match source {
+        MarketSource::Fixture => list_selection_candidates_with_source(MarketSource::Fixture).await,
+        MarketSource::Live => list_selection_candidates_from_snapshots(state, language, hub_ids).await,
     }
 }
 
@@ -166,8 +138,6 @@ fn get_sync_status() -> Result<SyncStatus, String> {
 fn get_sync_status_with_source(source: MarketSource) -> Result<SyncStatus, String> {
     if source.is_fixture() {
         Ok(fixture_sync_status())
-    } else if public_market_used_fallback() {
-        Ok(fixture_fallback_sync_status())
     } else {
         Ok(live_sync_status())
     }
@@ -177,16 +147,20 @@ fn get_sync_status_with_source(source: MarketSource) -> Result<SyncStatus, Strin
 async fn list_trade_hubs(
     state: tauri::State<'_, ReadApiState>,
 ) -> Result<Vec<TradeHubView>, String> {
-    if MarketSource::from_env().is_fixture() {
+    list_trade_hubs_with_state(&state, MarketSource::from_env()).await
+}
+
+async fn list_trade_hubs_with_state(
+    state: &ReadApiState,
+    source: MarketSource,
+) -> Result<Vec<TradeHubView>, String> {
+    if source.is_fixture() {
         return Ok(default_trade_hubs_as_db_records());
     }
 
     match state.get().await {
-        Ok(source) => source
-            .list_trade_hubs()
-            .await
-            .or_else(|_| Ok(default_trade_hubs_as_db_records())),
-        Err(_) => Ok(default_trade_hubs_as_db_records()),
+        Ok(source) => source.list_trade_hubs().await,
+        Err(error) => Err(error),
     }
 }
 
@@ -215,21 +189,123 @@ struct ReadApiSourceConfig {
 
 impl ReadApiSourceConfig {
     fn from_env() -> Result<Self, String> {
-        Self::from_env_reader(|name| std::env::var(name).ok())
+        Self::from_sources(|name| std::env::var(name).ok(), BUILD_TIME_API_BASE_URL)
     }
 
-    fn from_env_reader<F>(mut env: F) -> Result<Self, String>
+    #[cfg(test)]
+    fn from_env_reader<F>(env: F) -> Result<Self, String>
     where
         F: FnMut(&str) -> Option<String>,
     {
-        if let Some(base_url) = env(API_BASE_URL_ENV)
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
+        Self::from_sources(env, None)
+    }
+
+    fn from_sources<F>(mut env: F, build_time_base_url: Option<&str>) -> Result<Self, String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        if let Some(base_url) =
+            env(API_BASE_URL_ENV).and_then(|value| normalize_base_url(&value))
         {
             return Ok(Self { base_url });
         }
 
+        if let Some(base_url) = build_time_base_url.and_then(normalize_base_url) {
+            return Ok(Self { base_url });
+        }
+
         Err("EVETOOLS_API_BASE_URL is required".to_string())
+    }
+}
+
+fn normalize_base_url(value: &str) -> Option<String> {
+    let base_url = value.trim().trim_end_matches('/').to_string();
+    (!base_url.is_empty()).then_some(base_url)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct BackendProbeView {
+    path: String,
+    status: String,
+    http_status: Option<u16>,
+    message: Option<String>,
+}
+
+impl BackendProbeView {
+    fn ok(path: &str, http_status: u16) -> Self {
+        Self {
+            path: path.to_string(),
+            status: "ok".to_string(),
+            http_status: Some(http_status),
+            message: None,
+        }
+    }
+
+    fn error(path: &str, http_status: Option<u16>, message: String) -> Self {
+        Self {
+            path: path.to_string(),
+            status: "error".to_string(),
+            http_status,
+            message: Some(message),
+        }
+    }
+
+    fn not_configured(path: &str, message: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            status: "not-configured".to_string(),
+            http_status: None,
+            message: Some(message.to_string()),
+        }
+    }
+
+    fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct BackendConnectionStatusView {
+    configured: bool,
+    base_url: Option<String>,
+    overall_status: String,
+    probes: Vec<BackendProbeView>,
+}
+
+impl BackendConnectionStatusView {
+    fn not_configured(message: String) -> Self {
+        Self {
+            configured: false,
+            base_url: None,
+            overall_status: "not-configured".to_string(),
+            probes: BACKEND_PROBE_PATHS
+                .iter()
+                .map(|path| BackendProbeView::not_configured(path, &message))
+                .collect(),
+        }
+    }
+
+    fn from_probes(base_url: String, probes: Vec<BackendProbeView>) -> Self {
+        let health_ok = probes
+            .iter()
+            .find(|probe| probe.path == "/health")
+            .is_some_and(BackendProbeView::is_ok);
+        let all_ok = probes.iter().all(BackendProbeView::is_ok);
+        let overall_status = if all_ok {
+            "ready"
+        } else if health_ok {
+            "degraded"
+        } else {
+            "offline"
+        }
+        .to_string();
+
+        Self {
+            configured: true,
+            base_url: Some(base_url),
+            overall_status,
+            probes,
+        }
     }
 }
 
@@ -243,7 +319,10 @@ impl HostedReadApiClient {
     fn new(base_url: String) -> Self {
         Self {
             base_url,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("failed to build hosted API HTTP client"),
         }
     }
 
@@ -312,8 +391,37 @@ impl HostedReadApiClient {
                 language: &request.language,
                 limit_per_hub: request.limit_per_hub,
             },
-        )
-        .await
+            )
+            .await
+    }
+
+    async fn backend_connection_status(&self) -> BackendConnectionStatusView {
+        let (health, readiness, sync_health) = tokio::join!(
+            self.probe("/health"),
+            self.probe("/ready"),
+            self.probe("/sync-health")
+        );
+        let probes = vec![health, readiness, sync_health];
+        BackendConnectionStatusView::from_probes(self.base_url.clone(), probes)
+    }
+
+    async fn probe(&self, path: &str) -> BackendProbeView {
+        match self.http.get(format!("{}{}", self.base_url, path)).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let http_status = status.as_u16();
+                if status.is_success() {
+                    BackendProbeView::ok(path, http_status)
+                } else {
+                    let message = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|error| error.to_string());
+                    BackendProbeView::error(path, Some(http_status), message)
+                }
+            }
+            Err(error) => BackendProbeView::error(path, None, error.to_string()),
+        }
     }
 
     async fn get_json<T, Q>(&self, path: &str, query: &Q) -> Result<T, String>
@@ -408,6 +516,16 @@ async fn get_inventory_type(
         .await
 }
 
+#[tauri::command]
+async fn get_backend_connection_status(
+    state: tauri::State<'_, ReadApiState>,
+) -> Result<BackendConnectionStatusView, String> {
+    match state.get().await {
+        Ok(source) => Ok(source.backend_connection_status().await),
+        Err(error) => Ok(BackendConnectionStatusView::not_configured(error)),
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(ReadApiState::default())
@@ -420,7 +538,8 @@ pub fn run() {
             get_sde_catalog_status,
             import_sde_catalog_latest,
             search_inventory_types,
-            get_inventory_type
+            get_inventory_type,
+            get_backend_connection_status
         ])
         .run(tauri::generate_context!())
         .expect("failed to run EveTools desktop application");
@@ -469,25 +588,16 @@ mod tests {
     }
 
     #[test]
-    fn worker_status_reports_live_fixture_and_fallback_sources() {
+    fn worker_status_reports_live_and_fixture_sources() {
         assert_eq!(
             evetools_worker::live_sync_status().public_market_sync,
             "live-ready"
         );
         assert_eq!(evetools_worker::live_sync_status().data_source, "live");
-        assert_eq!(
-            evetools_worker::fixture_fallback_sync_status().public_market_sync,
-            "fixture-fallback"
-        );
-        assert_eq!(
-            evetools_worker::fixture_fallback_sync_status().data_source,
-            "fixture"
-        );
     }
 
     #[test]
-    fn sync_status_uses_last_public_market_fallback_signal() {
-        mark_public_market_fallback(false);
+    fn sync_status_depends_only_on_explicit_source() {
         assert_eq!(
             get_sync_status_with_source(MarketSource::Fixture)
                 .unwrap()
@@ -500,15 +610,6 @@ mod tests {
                 .public_market_sync,
             "live-ready"
         );
-
-        mark_public_market_fallback(true);
-        assert_eq!(
-            get_sync_status_with_source(MarketSource::Live)
-                .unwrap()
-                .public_market_sync,
-            "fixture-fallback"
-        );
-        mark_public_market_fallback(false);
     }
 
     #[test]
@@ -534,19 +635,133 @@ mod tests {
         assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
     }
 
+    #[test]
+    fn read_api_config_uses_build_time_base_url_when_runtime_env_is_missing() {
+        let config =
+            ReadApiSourceConfig::from_sources(|_| None, Some(" https://api.example.com/ "))
+                .unwrap();
+
+        assert_eq!(
+            config,
+            ReadApiSourceConfig {
+                base_url: "https://api.example.com".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn read_api_config_runtime_env_overrides_build_time_base_url() {
+        let config = ReadApiSourceConfig::from_sources(
+            |name| match name {
+                "EVETOOLS_API_BASE_URL" => Some(" https://runtime.example.com/ ".to_string()),
+                _ => None,
+            },
+            Some("https://build.example.com"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config,
+            ReadApiSourceConfig {
+                base_url: "https://runtime.example.com".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn backend_connection_status_reports_not_configured_without_base_url() {
+        let status = BackendConnectionStatusView::not_configured(
+            "EVETOOLS_API_BASE_URL is required".to_string(),
+        );
+
+        assert!(!status.configured);
+        assert_eq!(status.overall_status, "not-configured");
+        assert_eq!(
+            status
+                .probes
+                .iter()
+                .map(|probe| probe.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/health", "/ready", "/sync-health"]
+        );
+        assert!(
+            status
+                .probes
+                .iter()
+                .all(|probe| probe.status == "not-configured")
+        );
+    }
+
+    #[test]
+    fn backend_connection_status_distinguishes_ready_degraded_and_offline() {
+        let ready = BackendConnectionStatusView::from_probes(
+            "https://api.example.com".to_string(),
+            vec![
+                BackendProbeView::ok("/health", 200),
+                BackendProbeView::ok("/ready", 200),
+                BackendProbeView::ok("/sync-health", 200),
+            ],
+        );
+        assert_eq!(ready.overall_status, "ready");
+
+        let degraded = BackendConnectionStatusView::from_probes(
+            "https://api.example.com".to_string(),
+            vec![
+                BackendProbeView::ok("/health", 200),
+                BackendProbeView::ok("/ready", 200),
+                BackendProbeView::error("/sync-health", Some(500), "sync check failed".to_string()),
+            ],
+        );
+        assert_eq!(degraded.overall_status, "degraded");
+
+        let offline = BackendConnectionStatusView::from_probes(
+            "https://api.example.com".to_string(),
+            vec![
+                BackendProbeView::error("/health", None, "connection refused".to_string()),
+                BackendProbeView::error("/ready", None, "connection refused".to_string()),
+                BackendProbeView::error("/sync-health", None, "connection refused".to_string()),
+            ],
+        );
+        assert_eq!(offline.overall_status, "offline");
+    }
+
     #[tokio::test]
-    async fn hosted_lookup_errors_fall_back_to_fixture_data() {
+    async fn live_lookup_errors_are_reported_without_fixture_fallback() {
         let state = ReadApiState::default();
-        let result = lookup_market_price_with_state(
+        let error = lookup_market_price_with_state(
             &state,
             "Tritanium".to_string(),
             "zh-CN".to_string(),
             MarketSource::Live,
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(result.type_id, 34);
-        assert_eq!(result.item_name, "Tritanium");
+        assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
+    }
+
+    #[tokio::test]
+    async fn live_selection_errors_are_reported_without_fixture_fallback() {
+        let state = ReadApiState::default();
+        let error = list_selection_candidates_with_state(
+            &state,
+            "zh-CN".to_string(),
+            vec!["jita".to_string()],
+            MarketSource::Live,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
+    }
+
+    #[tokio::test]
+    async fn live_trade_hubs_errors_are_reported_without_fixture_fallback() {
+        let state = ReadApiState::default();
+        let error = list_trade_hubs_with_state(&state, MarketSource::Live)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
     }
 }

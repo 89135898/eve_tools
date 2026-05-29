@@ -18,6 +18,7 @@ export const resources = {
         enUS: "English"
       },
       statusCards: {
+        backendApi: "后端 API",
         publicMarketSync: "公共市场同步",
         orderSync: "订单同步",
         dataSource: "数据来源"
@@ -57,6 +58,19 @@ export const resources = {
         reasons: "原因"
       },
       codes: {
+        backendStatus: {
+          ready: "就绪",
+          degraded: "降级",
+          offline: "离线",
+          "not-configured": "未配置",
+          unknown: "未知"
+        },
+        backendProbe: {
+          ok: "正常",
+          error: "错误",
+          "not-configured": "未配置",
+          unknown: "未知"
+        },
         syncStatus: {
           "fixture-ready": "测试数据就绪",
           "fixture-fallback": "测试数据回退",
@@ -124,6 +138,7 @@ export const resources = {
         enUS: "English"
       },
       statusCards: {
+        backendApi: "Backend API",
         publicMarketSync: "Public market sync",
         orderSync: "Order sync",
         dataSource: "Data source"
@@ -163,6 +178,19 @@ export const resources = {
         reasons: "Reasons"
       },
       codes: {
+        backendStatus: {
+          ready: "Ready",
+          degraded: "Degraded",
+          offline: "Offline",
+          "not-configured": "Not configured",
+          unknown: "Unknown"
+        },
+        backendProbe: {
+          ok: "OK",
+          error: "Error",
+          "not-configured": "Not configured",
+          unknown: "Unknown"
+        },
         syncStatus: {
           "fixture-ready": "Fixture ready",
           "fixture-fallback": "Fixture fallback",
