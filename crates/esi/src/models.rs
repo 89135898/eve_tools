@@ -44,6 +44,41 @@ pub struct EsiMarketHistoryDay {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EsiCharacterOrder {
+    pub duration: i32,
+    pub escrow: Option<f64>,
+    #[serde(default)]
+    pub is_buy_order: bool,
+    pub is_corporation: bool,
+    pub issued: String,
+    pub location_id: i64,
+    pub min_volume: Option<i32>,
+    pub order_id: i64,
+    pub price: f64,
+    pub range: String,
+    pub region_id: i32,
+    pub type_id: i32,
+    pub volume_remain: i32,
+    pub volume_total: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EsiTokenResponse {
+    pub access_token: String,
+    pub expires_in: i64,
+    pub token_type: String,
+    pub refresh_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EsiCharacterIdentity {
+    pub character_id: i64,
+    pub character_name: String,
+    pub owner_hash: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EsiTypeInfo {
     pub group_id: i32,
     pub market_group_id: Option<i32>,
