@@ -149,6 +149,8 @@ cargo run -p evetools-worker --bin sync-public-market-region -- \
   --json
 ```
 
+生产后端可以通过 GitHub Actions、S3、SSM 和 GitHub OIDC 部署到固定 EC2 实例。部署准备、IAM 权限、systemd 服务和手动验证步骤见 [AWS S3 + SSM + OIDC 部署指南](docs/deployment/aws-s3-ssm-oidc.md)。
+
 `--all-default-regions` 会按顺序同步 Jita、Amarr、Dodixie、Rens、Hek 所在 region。Worker 会为每个 region 获取数据库 lease；如果另一个 worker 已经在同步同一 region，本次运行会返回 `already-running` 并以成功退出，避免 scheduler 因正常锁竞争误报失败。`--max-age-seconds` 用于跳过仍足够新的快照，减少 ESI 请求和数据库写入。
 
 本阶段不接入监控报警平台。生产健康状态通过 HTTP API 暴露：
