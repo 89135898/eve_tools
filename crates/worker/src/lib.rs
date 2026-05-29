@@ -682,10 +682,13 @@ pub fn market_order_snapshots_for_hubs(
         .filter(|hub| hub.region_id == region_id)
         .map(|hub| hub.station_id)
         .collect();
+    let mut seen_order_ids = HashSet::new();
 
     orders
         .iter()
-        .filter(|order| hub_station_ids.contains(&order.location_id))
+        .filter(|order| {
+            hub_station_ids.contains(&order.location_id) && seen_order_ids.insert(order.order_id)
+        })
         .map(|order| evetools_db::MarketOrderSnapshotInput {
             sync_run_id,
             region_id,
@@ -944,5 +947,36 @@ mod tests {
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].station_id, 60003760);
         assert_eq!(snapshots[0].order_id, 7_000_000_001);
+    }
+
+    #[test]
+    fn market_order_snapshots_drop_duplicate_order_ids() {
+        let mut duplicate = evetools_esi::EsiMarketOrder {
+            duration: 90,
+            is_buy_order: true,
+            issued: "2026-05-25T11:45:00Z".to_string(),
+            location_id: 60003760,
+            min_volume: 1,
+            order_id: 7_000_000_001,
+            price: 5.01,
+            range: "station".to_string(),
+            system_id: 30000142,
+            type_id: 34,
+            volume_remain: 500_000,
+            volume_total: 1_000_000,
+        };
+        let first = duplicate.clone();
+        duplicate.price = 5.02;
+
+        let snapshots = market_order_snapshots_for_hubs(
+            42,
+            10000002,
+            &[first, duplicate],
+            &default_trade_hubs(),
+        );
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].order_id, 7_000_000_001);
+        assert_eq!(snapshots[0].price, 5.01);
     }
 }
