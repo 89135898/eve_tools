@@ -8,7 +8,8 @@ pub use catalog::{
 };
 pub use market::{
     MarketDbError, MarketOrderSnapshot, MarketOrderSnapshotInput, MarketRepository,
-    StationOrderBook, TradeHub,
+    MarketSyncHealthReport, MarketSyncHealthStatus, MarketSyncStartResult, MarketSyncStartStatus,
+    StationOrderBook, TradeHub, TradeHubSyncHealth,
 };
 pub use schema::{connect_pool, migrate_catalog_schema};
 
