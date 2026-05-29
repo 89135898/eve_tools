@@ -1,7 +1,6 @@
 use crate::{
     EsiCharacterOrder, EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType,
-    EsiTokenResponse, EsiTypeInfo,
-    ResolvedInventoryType, UniverseIdsResponse,
+    EsiTokenResponse, EsiTypeInfo, ResolvedInventoryType, UniverseIdsResponse,
 };
 use serde::de::DeserializeOwned;
 use std::time::Duration;

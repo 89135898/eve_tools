@@ -7,7 +7,7 @@ use axum::{
 };
 use evetools_api::{
     ApiError, EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest,
-    MarketLookupRequest, SelectionCandidatesRequest, StationOrdersRequest,
+    MarketLookupRequest, OrderMonitorRequest, SelectionCandidatesRequest, StationOrdersRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, str::FromStr};
@@ -107,6 +107,10 @@ pub fn build_router(api: EveToolsReadApi) -> Router {
         .route("/trade-hubs", get(list_trade_hubs))
         .route("/station-orders", get(latest_station_orders))
         .route("/selection-candidates", get(selection_candidates))
+        .route(
+            "/characters/{character_id}/order-monitor",
+            get(order_monitor_items),
+        )
         .with_state(api)
 }
 
@@ -209,6 +213,22 @@ async fn selection_candidates(
     .into_response())
 }
 
+async fn order_monitor_items(
+    State(api): State<EveToolsReadApi>,
+    Path(character_id): Path<i64>,
+    Query(query): Query<OrderMonitorQuery>,
+) -> Result<Response, HttpApiError> {
+    Ok(Json(
+        api.order_monitor_items(OrderMonitorRequest {
+            character_id,
+            language: query.language.unwrap_or_else(default_language),
+            limit: query.limit.unwrap_or(DEFAULT_STATION_ORDERS_LIMIT),
+        })
+        .await?,
+    )
+    .into_response())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct HealthResponse {
     status: String,
@@ -251,6 +271,12 @@ struct SelectionCandidatesQuery {
     hub_ids: Option<String>,
     language: Option<String>,
     limit_per_hub: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct OrderMonitorQuery {
+    language: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug)]

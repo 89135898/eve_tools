@@ -153,10 +153,22 @@ impl AuthRepository {
         Ok(row.map(character_auth_token_from_record))
     }
 
-    pub async fn start_character_order_sync(
+    pub async fn latest_authorized_character(
         &self,
-        character_id: i64,
-    ) -> Result<i64, AuthDbError> {
+    ) -> Result<Option<AuthorizedCharacter>, AuthDbError> {
+        let row = sqlx::query_as::<_, AuthorizedCharacterRecord>(
+            "SELECT character_id, character_name, owner_hash, last_login_at
+             FROM evetools_catalog.characters
+             ORDER BY last_login_at DESC, updated_at DESC, character_id
+             LIMIT 1",
+        )
+        .persistent(false)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(authorized_character_from_record))
+    }
+
+    pub async fn start_character_order_sync(&self, character_id: i64) -> Result<i64, AuthDbError> {
         let sync_run_id = sqlx::query_scalar(
             "INSERT INTO evetools_catalog.character_order_sync_runs
                 (character_id, started_at, status)
@@ -317,6 +329,8 @@ type CharacterAuthTokenRecord = (
     String,
 );
 
+type AuthorizedCharacterRecord = (i64, String, Option<String>, DateTime<Utc>);
+
 type CharacterOrderSnapshotRecord = (
     i64,
     i64,
@@ -354,6 +368,15 @@ fn character_auth_token_from_record(row: CharacterAuthTokenRecord) -> CharacterA
         access_token_expires_at: row.3.map(|value| value.to_rfc3339()),
         scopes: row.4,
         token_type: row.5,
+    }
+}
+
+fn authorized_character_from_record(row: AuthorizedCharacterRecord) -> AuthorizedCharacter {
+    AuthorizedCharacter {
+        character_id: row.0,
+        character_name: row.1,
+        owner_hash: row.2,
+        last_login_at: row.3.to_rfc3339(),
     }
 }
 

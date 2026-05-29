@@ -1,7 +1,7 @@
 use evetools_api::EveToolsReadApi;
 use evetools_db::{
-    connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput, MarketRepository,
-    TradeHub,
+    connect_pool, migrate_catalog_schema, AuthRepository, AuthorizedCharacter, CatalogRepository,
+    CharacterOrderSnapshotInput, ImportCatalogInput, MarketRepository, TradeHub,
 };
 use evetools_http_api::build_router;
 use evetools_sde::{
@@ -66,6 +66,7 @@ async fn read_http_api_exposes_health_hubs_and_selection_candidates() {
     assert_eq!(lookup["best_ask"], "5.49");
 
     let candidates = router
+        .clone()
         .oneshot(request(
             "/selection-candidates?language=zh-CN&hub_ids=jita&limit_per_hub=10",
         ))
@@ -76,6 +77,24 @@ async fn read_http_api_exposes_health_hubs_and_selection_candidates() {
     assert_eq!(candidates.as_array().unwrap().len(), 1);
     assert_eq!(candidates.as_array().unwrap()[0]["hub_id"], "jita");
     assert_eq!(candidates.as_array().unwrap()[0]["item_name"], "三钛合金");
+
+    let order_monitor = router
+        .oneshot(request(
+            "/characters/90000001/order-monitor?language=zh-CN&limit=20",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(order_monitor.status(), 200);
+    let order_monitor = json_body(order_monitor).await;
+    assert_eq!(order_monitor.as_array().unwrap().len(), 1);
+    assert_eq!(
+        order_monitor.as_array().unwrap()[0]["order_id"],
+        "8000000001"
+    );
+    assert_eq!(
+        order_monitor.as_array().unwrap()[0]["recommended_action"],
+        "lower"
+    );
 }
 
 fn request(uri: &str) -> axum::http::Request<axum::body::Body> {
@@ -126,6 +145,26 @@ async fn prepare_seeded_api() -> Option<EveToolsReadApi> {
         .await
         .unwrap();
     market.complete_sync_run(sync_run_id, 1, 2).await.unwrap();
+
+    let auth = AuthRepository::new(pool.clone());
+    auth.upsert_authorized_character(&AuthorizedCharacter {
+        character_id: 90_000_001,
+        character_name: "Market Pilot".to_string(),
+        owner_hash: Some("owner-hash".to_string()),
+        last_login_at: "2026-05-29T10:00:00Z".to_string(),
+    })
+    .await
+    .unwrap();
+    let character_sync_run_id = auth.start_character_order_sync(90_000_001).await.unwrap();
+    auth.replace_character_order_snapshots(
+        character_sync_run_id,
+        &[character_tritanium_sell_order(character_sync_run_id)],
+    )
+    .await
+    .unwrap();
+    auth.complete_character_order_sync(character_sync_run_id, 1)
+        .await
+        .unwrap();
 
     Some(EveToolsReadApi::from_pool(pool))
 }
@@ -256,5 +295,26 @@ fn tritanium_sell_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInp
         min_volume: 1,
         order_range: "station".to_string(),
         system_id: 30000142,
+    }
+}
+
+fn character_tritanium_sell_order(sync_run_id: i64) -> CharacterOrderSnapshotInput {
+    CharacterOrderSnapshotInput {
+        sync_run_id,
+        character_id: 90_000_001,
+        order_id: 8_000_000_001,
+        type_id: 34,
+        region_id: 10000002,
+        location_id: 60003760,
+        is_buy_order: false,
+        price: 5.60,
+        volume_remain: 100_000,
+        volume_total: 200_000,
+        issued: "2026-05-29T10:00:00Z".to_string(),
+        duration: 90,
+        min_volume: Some(1),
+        order_range: "station".to_string(),
+        is_corporation: false,
+        escrow: Some(0.0),
     }
 }

@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  getAuthStatus,
   getBackendConnectionStatus,
   getSyncStatus,
   listOrderMonitorItems,
   listSelectionCandidates,
   listTradeHubs,
   lookupMarketPrice,
+  startEveSsoLogin,
+  syncCharacterOrders,
+  type AuthStatusView,
   type BackendConnectionStatusView,
   type MarketLookupView,
   type OrderMonitorView,
@@ -23,6 +27,7 @@ type RefreshResult = {
   hubs: TradeHubView[];
   orders: OrderMonitorView[];
   syncStatus: SyncStatus;
+  authStatus: AuthStatusView;
 };
 
 let refreshRequestInFlight: Promise<RefreshResult> | null = null;
@@ -33,13 +38,15 @@ async function runRefreshRequest(query: string, language: string, selectedHubId:
   const hubIds = selectedHubId === "all" ? [] : [selectedHubId];
   const candidateResult = await listSelectionCandidates(language, hubIds);
   const candidateStatus = await getSyncStatus();
-  const orderResult = await listOrderMonitorItems();
+  const authStatus = await getAuthStatus();
+  const orderResult = await listOrderMonitorItems(language);
   return {
     lookup: lookupResult,
     candidates: candidateResult,
     hubs: hubResult,
     orders: orderResult,
-    syncStatus: candidateStatus
+    syncStatus: candidateStatus,
+    authStatus
   };
 }
 
@@ -70,8 +77,10 @@ export default function App() {
   const [selectedHubId, setSelectedHubId] = useState("all");
   const [orders, setOrders] = useState<OrderMonitorView[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatusView | null>(null);
   const [backendStatus, setBackendStatus] = useState<BackendConnectionStatusView | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [authBusy, setAuthBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
   const mountedRef = useRef(true);
@@ -109,6 +118,7 @@ export default function App() {
       setHubs(result.hubs);
       setOrders(result.orders);
       setSyncStatus(result.syncStatus);
+      setAuthStatus(result.authStatus);
       setLoadState("ready");
     } catch (err) {
       if (!mountedRef.current) {
@@ -119,6 +129,7 @@ export default function App() {
       setHubs([]);
       setOrders([]);
       setSyncStatus(null);
+      setAuthStatus(null);
       setError(err instanceof Error ? err.message : String(err));
       setLoadState("error");
     } finally {
@@ -133,6 +144,22 @@ export default function App() {
       mountedRef.current = false;
     };
   }, [language, selectedHubId]);
+
+  async function runAuthAction(action: () => Promise<unknown>) {
+    if (authBusy) {
+      return;
+    }
+    setAuthBusy(true);
+    setError(null);
+    try {
+      await action();
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   return (
     <main className="app-shell">
@@ -169,7 +196,11 @@ export default function App() {
           detail={backendStatus?.base_url ?? undefined}
         />
         <StatusCard label={t("statusCards.publicMarketSync")} value={code("codes.syncStatus", syncStatus?.public_market_sync)} />
-        <StatusCard label={t("statusCards.orderSync")} value={code("codes.syncStatus", syncStatus?.authenticated_order_sync)} />
+        <StatusCard
+          label={t("statusCards.orderSync")}
+          value={code("codes.syncStatus", authStatus?.status ?? syncStatus?.authenticated_order_sync)}
+          detail={authStatus?.character_name ?? undefined}
+        />
         <StatusCard label={t("statusCards.dataSource")} value={code("codes.dataSource", syncStatus?.data_source)} />
       </section>
 
@@ -263,7 +294,23 @@ export default function App() {
         <section className="panel">
           <div className="panel-header">
             <h2>{t("orders.title")}</h2>
-            <span>{t("orders.count", { count: orders.length })}</span>
+            <div className="panel-actions">
+              <button
+                type="button"
+                onClick={() => void runAuthAction(startEveSsoLogin)}
+                disabled={authBusy || loadState === "loading"}
+              >
+                {authBusy ? t("actions.authorizing") : t("actions.login")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runAuthAction(syncCharacterOrders)}
+                disabled={authBusy || loadState === "loading" || authStatus?.status !== "authorized"}
+              >
+                {t("actions.syncOrders")}
+              </button>
+              <span>{t("orders.count", { count: orders.length })}</span>
+            </div>
           </div>
           <table>
             <thead>

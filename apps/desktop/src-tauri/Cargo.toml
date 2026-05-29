@@ -14,9 +14,17 @@ tauri-build.workspace = true
 
 [dependencies]
 evetools-api = { path = "../../../crates/api" }
+evetools-db = { path = "../../../crates/db" }
 evetools-domain = { path = "../../../crates/domain" }
+evetools-esi = { path = "../../../crates/esi" }
 evetools-worker = { path = "../../../crates/worker" }
+base64.workspace = true
+chrono.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tauri.workspace = true
 tokio.workspace = true
+url.workspace = true

@@ -1127,14 +1127,22 @@ dependencies = [
 name = "evetools-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "evetools-api",
+ "evetools-db",
  "evetools-domain",
+ "evetools-esi",
  "evetools-worker",
+ "rand 0.8.6",
  "reqwest",
  "serde",
+ "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tokio",
+ "url",
 ]
 
 [[package]]

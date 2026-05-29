@@ -104,13 +104,23 @@ async fn stores_character_tokens_and_latest_order_snapshots() {
         stored_token.scopes,
         vec!["esi-markets.read_character_orders.v1".to_string()]
     );
+    let latest_character = repository
+        .latest_authorized_character()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest_character.character_id, 90_000_001);
+    assert_eq!(latest_character.character_name, "Market Pilot");
 
     let sync_run_id = repository
         .start_character_order_sync(90_000_001)
         .await
         .unwrap();
     repository
-        .replace_character_order_snapshots(sync_run_id, &[sell_order(sync_run_id), buy_order(sync_run_id)])
+        .replace_character_order_snapshots(
+            sync_run_id,
+            &[sell_order(sync_run_id), buy_order(sync_run_id)],
+        )
         .await
         .unwrap();
     repository

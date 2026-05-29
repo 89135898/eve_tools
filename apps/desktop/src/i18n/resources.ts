@@ -10,7 +10,10 @@ export const resources = {
       actions: {
         refresh: "刷新",
         refreshing: "刷新中",
-        lookup: "查询"
+        lookup: "查询",
+        login: "登录 EVE",
+        authorizing: "授权中",
+        syncOrders: "同步订单"
       },
       language: {
         label: "语言",
@@ -76,6 +79,10 @@ export const resources = {
           "fixture-fallback": "测试数据回退",
           "live-ready": "实时 ESI 就绪",
           "not-authorized": "未授权",
+          "not-configured": "未配置",
+          authorized: "已授权",
+          success: "同步成功",
+          failed: "同步失败",
           unknown: "未知"
         },
         dataSource: {
@@ -113,6 +120,8 @@ export const resources = {
           sparse_market_data: "市场数据稀疏",
           missing_market_side: "缺少单侧盘口",
           stale_market_data: "市场数据过期",
+          missing_market_data: "缺少市场数据",
+          already_best_price: "已是最优价格",
           negative_net_profit: "预估净收益为负",
           undercut_detected: "检测到被压价",
           high_velocity_item: "高流动性物品",
@@ -130,7 +139,10 @@ export const resources = {
       actions: {
         refresh: "Refresh",
         refreshing: "Refreshing",
-        lookup: "Lookup"
+        lookup: "Lookup",
+        login: "Log in EVE",
+        authorizing: "Authorizing",
+        syncOrders: "Sync orders"
       },
       language: {
         label: "Language",
@@ -196,6 +208,10 @@ export const resources = {
           "fixture-fallback": "Fixture fallback",
           "live-ready": "Live ESI ready",
           "not-authorized": "Not authorized",
+          "not-configured": "Not configured",
+          authorized: "Authorized",
+          success: "Sync succeeded",
+          failed: "Sync failed",
           unknown: "Unknown"
         },
         dataSource: {
@@ -233,6 +249,8 @@ export const resources = {
           sparse_market_data: "Sparse market data",
           missing_market_side: "Missing one side of book",
           stale_market_data: "Stale market data",
+          missing_market_data: "Missing market data",
+          already_best_price: "Already best price",
           negative_net_profit: "Estimated net profit is negative",
           undercut_detected: "Undercut detected",
           high_velocity_item: "High velocity item",

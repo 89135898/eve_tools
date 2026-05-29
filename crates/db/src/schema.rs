@@ -152,8 +152,12 @@ mod tests {
     fn adds_authenticated_order_monitor_tables() {
         assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.characters");
         assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_auth_tokens");
-        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_sync_runs");
-        assert_schema_contains("CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_snapshots");
+        assert_schema_contains(
+            "CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_sync_runs",
+        );
+        assert_schema_contains(
+            "CREATE TABLE IF NOT EXISTS evetools_catalog.character_order_snapshots",
+        );
         assert_schema_contains("PRIMARY KEY (character_id)");
         assert_schema_contains("refresh_token TEXT NOT NULL");
         assert_schema_contains("scopes TEXT[] NOT NULL");
