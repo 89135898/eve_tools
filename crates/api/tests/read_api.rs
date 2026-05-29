@@ -4,7 +4,7 @@ use evetools_api::{
 };
 use evetools_db::{
     connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput, MarketRepository,
-    TradeHub,
+    MarketSyncHealthStatus, TradeHub,
 };
 use evetools_sde::{
     CatalogArchive, CatalogCategory, CatalogGroup, CatalogLocalization, CatalogMarketGroup,
@@ -124,6 +124,17 @@ async fn read_api_exposes_catalog_and_market_queries() {
         .unwrap();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].hub_id, "amarr");
+
+    let readiness = api.readiness().await.unwrap();
+    assert_eq!(readiness.status, "ready");
+    assert_eq!(readiness.database, "ok");
+    assert_eq!(readiness.catalog, "ok");
+    assert_eq!(readiness.market_sync, "ok");
+
+    let health = api.sync_health().await.unwrap();
+    assert!(!health.generated_at.is_empty());
+    assert_eq!(health.hubs[0].hub_id, "jita");
+    assert_eq!(health.hubs[0].status, MarketSyncHealthStatus::Fresh);
 }
 
 async fn prepare_seeded_api() -> Option<EveToolsReadApi> {

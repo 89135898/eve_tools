@@ -1,7 +1,7 @@
 use evetools_db::{
     connect_pool, migrate_catalog_schema, CatalogDbError, CatalogRepository, CatalogStatus,
-    InventoryTypeView, MarketDbError, MarketOrderSnapshot, MarketRepository, StationOrderBook,
-    TradeHub,
+    InventoryTypeView, MarketDbError, MarketOrderSnapshot, MarketRepository, MarketSyncHealthStatus,
+    StationOrderBook, TradeHub,
 };
 use evetools_domain::{
     build_selection_candidate, FeeProfile, MarketLookupView, OrderBookSummary, PriceTrend,
@@ -14,7 +14,8 @@ use thiserror::Error;
 
 pub use evetools_db::{
     CatalogStatus as CatalogStatusView, InventoryTypeView as InventoryTypeApiView,
-    MarketOrderSnapshot as MarketOrderView, TradeHub as TradeHubView,
+    MarketOrderSnapshot as MarketOrderView, MarketSyncHealthReport as SyncHealthView,
+    TradeHub as TradeHubView,
 };
 
 const MAX_SELECTION_CANDIDATE_LIMIT: usize = 100;
@@ -66,8 +67,17 @@ pub struct SelectionCandidatesRequest {
     pub limit_per_hub: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessView {
+    pub status: String,
+    pub database: String,
+    pub catalog: String,
+    pub market_sync: String,
+}
+
 #[derive(Clone)]
 pub struct EveToolsReadApi {
+    pool: PgPool,
     catalog: CatalogRepository,
     market: MarketRepository,
 }
@@ -81,6 +91,7 @@ impl EveToolsReadApi {
 
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            pool: pool.clone(),
             catalog: CatalogRepository::new(pool.clone()),
             market: MarketRepository::new(pool),
         }
@@ -88,6 +99,43 @@ impl EveToolsReadApi {
 
     pub async fn catalog_status(&self) -> Result<CatalogStatus, ApiError> {
         Ok(self.catalog.latest_status().await?)
+    }
+
+    pub async fn readiness(&self) -> Result<ReadinessView, ApiError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .persistent(false)
+            .fetch_one(&self.pool)
+            .await?;
+
+        let catalog = self.catalog.latest_status().await?;
+        let health = self.market.sync_health_at(chrono::Utc::now()).await?;
+        let market_sync = if health.hubs.iter().any(|hub| {
+            matches!(
+                hub.status,
+                MarketSyncHealthStatus::Fresh
+                    | MarketSyncHealthStatus::Stale
+                    | MarketSyncHealthStatus::Syncing
+            )
+        }) {
+            "ok"
+        } else {
+            "degraded"
+        };
+
+        Ok(ReadinessView {
+            status: "ready".to_string(),
+            database: "ok".to_string(),
+            catalog: if catalog.status == "success" {
+                "ok".to_string()
+            } else {
+                "degraded".to_string()
+            },
+            market_sync: market_sync.to_string(),
+        })
+    }
+
+    pub async fn sync_health(&self) -> Result<SyncHealthView, ApiError> {
+        Ok(self.market.sync_health_at(chrono::Utc::now()).await?)
     }
 
     pub async fn get_inventory_type(

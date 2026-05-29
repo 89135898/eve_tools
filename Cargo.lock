@@ -1083,6 +1083,7 @@ dependencies = [
 name = "evetools-api"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "evetools-db",
  "evetools-domain",
  "evetools-sde",
