@@ -4,3 +4,5 @@ target/
 apps/desktop/src-tauri/gen/
 node_modules/
 apps/desktop/.env.local
+
+**/dist/
