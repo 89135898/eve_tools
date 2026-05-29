@@ -27,6 +27,8 @@ const DEFAULT_SELECTION_LIMIT: i64 = 25;
 const API_BASE_URL_ENV: &str = "EVETOOLS_API_BASE_URL";
 const BUILD_TIME_API_BASE_URL: Option<&str> = option_env!("EVETOOLS_API_BASE_URL");
 const BACKEND_PROBE_PATHS: [&str; 3] = ["/health", "/ready", "/sync-health"];
+const HOSTED_API_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HOSTED_API_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const DATABASE_URL_ENV: &str = "EVETOOLS_DATABASE_URL";
 const ESI_BASE_URL_ENV: &str = "EVETOOLS_ESI_BASE_URL";
 const SSO_BASE_URL_ENV: &str = "EVETOOLS_SSO_BASE_URL";
@@ -829,7 +831,8 @@ impl HostedReadApiClient {
         Self {
             base_url,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
+                .connect_timeout(HOSTED_API_CONNECT_TIMEOUT)
+                .timeout(HOSTED_API_REQUEST_TIMEOUT)
                 .build()
                 .expect("failed to build hosted API HTTP client"),
         }
@@ -1368,6 +1371,35 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "EVETOOLS_API_BASE_URL is required");
+    }
+
+    #[tokio::test]
+    async fn hosted_market_lookup_allows_slow_live_api_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = HostedReadApiClient::new(format!("http://{address}"));
+
+        assert_eq!(
+            client
+                .lookup_market_price("Tritanium", "zh-CN")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
