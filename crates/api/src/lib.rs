@@ -1,11 +1,12 @@
 use evetools_db::{
-    connect_pool, migrate_catalog_schema, CatalogDbError, CatalogRepository, CatalogStatus,
-    InventoryTypeView, MarketDbError, MarketOrderSnapshot, MarketRepository, MarketSyncHealthStatus,
-    StationOrderBook, TradeHub,
+    connect_pool, migrate_catalog_schema, AuthDbError, AuthRepository, CatalogDbError,
+    CatalogRepository, CatalogStatus, InventoryTypeView, MarketDbError, MarketOrderSnapshot,
+    MarketRepository, MarketSyncHealthStatus, StationOrderBook, TradeHub,
 };
 use evetools_domain::{
-    build_selection_candidate, FeeProfile, MarketLookupView, OrderBookSummary, PriceTrend,
-    SelectionCandidateHubView, SelectionCandidateView,
+    analyze_character_order_repricing, build_selection_candidate, CharacterOrderForRepricing,
+    FeeProfile, MarketLookupView, MarketPriceReference, OrderBookSummary, OrderMonitorView,
+    PriceTrend, SelectionCandidateHubView, SelectionCandidateView,
 };
 use rust_decimal::{prelude::FromPrimitive, Decimal};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub enum ApiError {
     Catalog(#[from] CatalogDbError),
     #[error("market query error: {0}")]
     Market(#[from] MarketDbError),
+    #[error("auth query error: {0}")]
+    Auth(#[from] AuthDbError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,13 @@ pub struct SelectionCandidatesRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderMonitorRequest {
+    pub character_id: i64,
+    pub language: String,
+    pub limit: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessView {
     pub status: String,
     pub database: String,
@@ -80,6 +90,7 @@ pub struct EveToolsReadApi {
     pool: PgPool,
     catalog: CatalogRepository,
     market: MarketRepository,
+    auth: AuthRepository,
 }
 
 impl EveToolsReadApi {
@@ -93,7 +104,8 @@ impl EveToolsReadApi {
         Self {
             pool: pool.clone(),
             catalog: CatalogRepository::new(pool.clone()),
-            market: MarketRepository::new(pool),
+            market: MarketRepository::new(pool.clone()),
+            auth: AuthRepository::new(pool),
         }
     }
 
@@ -248,6 +260,55 @@ impl EveToolsReadApi {
         Ok(all_candidates)
     }
 
+    pub async fn order_monitor_items(
+        &self,
+        request: OrderMonitorRequest,
+    ) -> Result<Vec<OrderMonitorView>, ApiError> {
+        if request.limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let orders = self
+            .auth
+            .latest_character_orders(request.character_id, request.limit.min(500))
+            .await?;
+        let mut views = Vec::with_capacity(orders.len());
+
+        for order in orders {
+            let item_name = self
+                .catalog
+                .get_inventory_type(order.type_id, &request.language)
+                .await?
+                .map(|item| item.display_name)
+                .unwrap_or_else(|| format!("Type {}", order.type_id));
+            let market = self
+                .market
+                .latest_station_order_book(
+                    order.region_id,
+                    order.location_id,
+                    order.type_id,
+                    &request.language,
+                )
+                .await?
+                .and_then(station_order_book_to_market_reference);
+
+            if let Some(price) = Decimal::from_f64(order.price) {
+                views.push(analyze_character_order_repricing(
+                    &CharacterOrderForRepricing {
+                        order_id: order.order_id,
+                        type_id: order.type_id,
+                        item_name,
+                        is_buy_order: order.is_buy_order,
+                        price,
+                    },
+                    market,
+                ));
+            }
+        }
+
+        Ok(views)
+    }
+
     async fn resolve_inventory_type(
         &self,
         request: &MarketLookupRequest,
@@ -344,4 +405,12 @@ fn station_order_book_to_market_lookup(book: StationOrderBook) -> Option<MarketL
         last_synced_at: book.last_synced_at,
     };
     Some(MarketLookupView::from_summary(summary, PriceTrend::Stable))
+}
+
+fn station_order_book_to_market_reference(book: StationOrderBook) -> Option<MarketPriceReference> {
+    Some(MarketPriceReference {
+        best_bid: Decimal::from_f64(book.best_bid)?,
+        best_ask: Decimal::from_f64(book.best_ask)?,
+        last_synced_at: book.last_synced_at,
+    })
 }

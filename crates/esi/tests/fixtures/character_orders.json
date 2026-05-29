@@ -1,0 +1,34 @@
+[
+  {
+    "duration": 90,
+    "escrow": 0.0,
+    "is_buy_order": false,
+    "is_corporation": false,
+    "issued": "2026-05-29T10:00:00Z",
+    "location_id": 60003760,
+    "min_volume": 1,
+    "order_id": 8000000001,
+    "price": 5.6,
+    "range": "station",
+    "region_id": 10000002,
+    "type_id": 34,
+    "volume_remain": 100000,
+    "volume_total": 200000
+  },
+  {
+    "duration": 90,
+    "escrow": 120000.0,
+    "is_buy_order": true,
+    "is_corporation": false,
+    "issued": "2026-05-29T10:05:00Z",
+    "location_id": 60003760,
+    "min_volume": 1,
+    "order_id": 8000000002,
+    "price": 4.95,
+    "range": "station",
+    "region_id": 10000002,
+    "type_id": 34,
+    "volume_remain": 50000,
+    "volume_total": 100000
+  }
+]

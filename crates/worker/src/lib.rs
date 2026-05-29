@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -13,6 +14,25 @@ pub enum PublicMarketSyncError {
     MarketDb(#[from] evetools_db::MarketDbError),
     #[error("public ESI error: {0}")]
     Esi(#[from] evetools_esi::EsiError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthenticatedOrderSyncError {
+    #[error("auth database error: {0}")]
+    AuthDb(#[from] evetools_db::AuthDbError),
+    #[error("authenticated ESI error: {0}")]
+    Esi(#[from] evetools_esi::EsiError),
+    #[error("no auth token stored for character {character_id}")]
+    MissingAuthToken { character_id: i64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticatedOrderSyncSummary {
+    pub sync_run_id: i64,
+    pub character_id: i64,
+    pub status: String,
+    pub order_count: i64,
+    pub message: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -433,6 +453,112 @@ pub async fn sync_public_market_region_orders(
         page_count: 0,
         message: "synced".to_string(),
     })
+}
+
+pub async fn sync_authenticated_character_orders(
+    repository: &evetools_db::AuthRepository,
+    client: &evetools_esi::EsiClient,
+    sso_base_url: &str,
+    client_id: &str,
+    character_id: i64,
+) -> Result<AuthenticatedOrderSyncSummary, AuthenticatedOrderSyncError> {
+    let mut token = repository
+        .auth_token(character_id)
+        .await?
+        .ok_or(AuthenticatedOrderSyncError::MissingAuthToken { character_id })?;
+    let access_token = if token_access_token_is_fresh(&token) {
+        token.access_token.clone().unwrap_or_default()
+    } else {
+        let refreshed = client
+            .refresh_access_token(sso_base_url, client_id, &token.refresh_token)
+            .await?;
+        token.access_token = Some(refreshed.access_token.clone());
+        token.refresh_token = refreshed.refresh_token.unwrap_or(token.refresh_token);
+        token.access_token_expires_at =
+            Some((Utc::now() + chrono::Duration::seconds(refreshed.expires_in)).to_rfc3339());
+        token.token_type = refreshed.token_type;
+        repository.upsert_auth_token(&token).await?;
+        token.access_token.clone().unwrap_or_default()
+    };
+
+    let sync_run_id = repository.start_character_order_sync(character_id).await?;
+    let orders = match client.character_orders(character_id, &access_token).await {
+        Ok(orders) => orders,
+        Err(error) => {
+            let _ = repository
+                .fail_character_order_sync(sync_run_id, &error.to_string())
+                .await;
+            return Err(error.into());
+        }
+    };
+
+    let snapshots = character_order_snapshots(sync_run_id, character_id, &orders);
+    if let Err(error) = repository
+        .replace_character_order_snapshots(sync_run_id, &snapshots)
+        .await
+    {
+        let _ = repository
+            .fail_character_order_sync(sync_run_id, &error.to_string())
+            .await;
+        return Err(error.into());
+    }
+
+    let order_count = snapshots.len() as i64;
+    repository
+        .complete_character_order_sync(sync_run_id, order_count)
+        .await?;
+
+    Ok(AuthenticatedOrderSyncSummary {
+        sync_run_id,
+        character_id,
+        status: "success".to_string(),
+        order_count,
+        message: "synced".to_string(),
+    })
+}
+
+fn token_access_token_is_fresh(token: &evetools_db::CharacterAuthToken) -> bool {
+    let Some(access_token) = token.access_token.as_deref() else {
+        return false;
+    };
+    if access_token.trim().is_empty() {
+        return false;
+    }
+    let Some(expires_at) = token.access_token_expires_at.as_deref() else {
+        return false;
+    };
+    let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at) else {
+        return false;
+    };
+    expires_at.with_timezone(&Utc) > Utc::now() + chrono::Duration::seconds(60)
+}
+
+fn character_order_snapshots(
+    sync_run_id: i64,
+    character_id: i64,
+    orders: &[evetools_esi::EsiCharacterOrder],
+) -> Vec<evetools_db::CharacterOrderSnapshotInput> {
+    orders
+        .iter()
+        .map(|order| evetools_db::CharacterOrderSnapshotInput {
+            sync_run_id,
+            character_id,
+            order_id: order.order_id,
+            type_id: order.type_id,
+            region_id: order.region_id,
+            location_id: order.location_id,
+            is_buy_order: order.is_buy_order,
+            price: order.price,
+            volume_remain: i64::from(order.volume_remain),
+            volume_total: i64::from(order.volume_total),
+            issued: order.issued.clone(),
+            duration: order.duration,
+            min_volume: order.min_volume,
+            order_range: order.range.clone(),
+            is_corporation: order.is_corporation,
+            escrow: order.escrow,
+        })
+        .collect()
 }
 
 async fn should_skip_region(

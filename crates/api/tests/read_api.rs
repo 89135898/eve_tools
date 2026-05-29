@@ -1,10 +1,11 @@
 use evetools_api::{
     EveToolsReadApi, InventoryTypeLookupRequest, InventoryTypeSearchRequest, MarketLookupRequest,
-    SelectionCandidatesRequest, StationOrdersRequest,
+    OrderMonitorRequest, SelectionCandidatesRequest, StationOrdersRequest,
 };
 use evetools_db::{
-    connect_pool, migrate_catalog_schema, CatalogRepository, ImportCatalogInput, MarketRepository,
-    MarketSyncHealthStatus, TradeHub,
+    connect_pool, migrate_catalog_schema, AuthRepository, AuthorizedCharacter, CatalogRepository,
+    CharacterOrderSnapshotInput, ImportCatalogInput, MarketRepository, MarketSyncHealthStatus,
+    TradeHub,
 };
 use evetools_sde::{
     CatalogArchive, CatalogCategory, CatalogGroup, CatalogLocalization, CatalogMarketGroup,
@@ -125,6 +126,25 @@ async fn read_api_exposes_catalog_and_market_queries() {
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].hub_id, "amarr");
 
+    let monitored_orders = api
+        .order_monitor_items(OrderMonitorRequest {
+            character_id: 90_000_001,
+            language: "zh-CN".to_string(),
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    assert_eq!(monitored_orders.len(), 2);
+    assert_eq!(monitored_orders[0].order_id, "8000000001");
+    assert_eq!(monitored_orders[0].item_name, "涓夐挍鍚堥噾");
+    assert_eq!(monitored_orders[0].recommended_action, "lower");
+    assert_eq!(monitored_orders[0].market_leader_price, "5.49");
+    assert_eq!(monitored_orders[0].recommended_price, "5.48");
+    assert_eq!(monitored_orders[1].order_id, "8000000002");
+    assert_eq!(monitored_orders[1].recommended_action, "raise");
+    assert_eq!(monitored_orders[1].market_leader_price, "5.01");
+    assert_eq!(monitored_orders[1].recommended_price, "5.02");
+
     let readiness = api.readiness().await.unwrap();
     assert_eq!(readiness.status, "ready");
     assert_eq!(readiness.database, "ok");
@@ -190,6 +210,29 @@ async fn prepare_seeded_api() -> Option<EveToolsReadApi> {
         .unwrap();
     market
         .complete_sync_run(amarr_sync_run_id, 1, 2)
+        .await
+        .unwrap();
+
+    let auth = AuthRepository::new(pool.clone());
+    auth.upsert_authorized_character(&AuthorizedCharacter {
+        character_id: 90_000_001,
+        character_name: "Market Pilot".to_string(),
+        owner_hash: Some("owner-hash".to_string()),
+        last_login_at: "2026-05-29T10:00:00Z".to_string(),
+    })
+    .await
+    .unwrap();
+    let character_sync_run_id = auth.start_character_order_sync(90_000_001).await.unwrap();
+    auth.replace_character_order_snapshots(
+        character_sync_run_id,
+        &[
+            character_tritanium_sell_order(character_sync_run_id),
+            character_tritanium_buy_order(character_sync_run_id),
+        ],
+    )
+    .await
+    .unwrap();
+    auth.complete_character_order_sync(character_sync_run_id, 2)
         .await
         .unwrap();
 
@@ -377,5 +420,47 @@ fn tritanium_sell_order(sync_run_id: i64) -> evetools_db::MarketOrderSnapshotInp
         min_volume: 1,
         order_range: "station".to_string(),
         system_id: 30000142,
+    }
+}
+
+fn character_tritanium_sell_order(sync_run_id: i64) -> CharacterOrderSnapshotInput {
+    CharacterOrderSnapshotInput {
+        sync_run_id,
+        character_id: 90_000_001,
+        order_id: 8_000_000_001,
+        type_id: 34,
+        region_id: 10000002,
+        location_id: 60003760,
+        is_buy_order: false,
+        price: 5.60,
+        volume_remain: 100_000,
+        volume_total: 200_000,
+        issued: "2026-05-29T10:00:00Z".to_string(),
+        duration: 90,
+        min_volume: Some(1),
+        order_range: "station".to_string(),
+        is_corporation: false,
+        escrow: Some(0.0),
+    }
+}
+
+fn character_tritanium_buy_order(sync_run_id: i64) -> CharacterOrderSnapshotInput {
+    CharacterOrderSnapshotInput {
+        sync_run_id,
+        character_id: 90_000_001,
+        order_id: 8_000_000_002,
+        type_id: 34,
+        region_id: 10000002,
+        location_id: 60003760,
+        is_buy_order: true,
+        price: 4.95,
+        volume_remain: 50_000,
+        volume_total: 100_000,
+        issued: "2026-05-29T10:05:00Z".to_string(),
+        duration: 90,
+        min_volume: Some(1),
+        order_range: "station".to_string(),
+        is_corporation: false,
+        escrow: Some(120_000.0),
     }
 }

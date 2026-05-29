@@ -76,6 +76,24 @@ export type BackendConnectionStatusView = {
   probes: BackendProbeView[];
 };
 
+export type AuthStatusView = {
+  status: string;
+  configured: boolean;
+  character_id: number | null;
+  character_name: string | null;
+  latest_sync_status: string | null;
+  latest_sync_completed_at: string | null;
+  message: string | null;
+};
+
+export type CharacterOrderSyncSummary = {
+  sync_run_id: number;
+  character_id: number;
+  status: string;
+  order_count: number;
+  message: string;
+};
+
 export function lookupMarketPrice(query: string, language: string): Promise<MarketLookupView> {
   return invoke<MarketLookupView>("lookup_market_price", { query, language });
 }
@@ -91,12 +109,24 @@ export function listTradeHubs(): Promise<TradeHubView[]> {
   return invoke<TradeHubView[]>("list_trade_hubs");
 }
 
-export function listOrderMonitorItems(): Promise<OrderMonitorView[]> {
-  return invoke<OrderMonitorView[]>("list_order_monitor_items");
+export function listOrderMonitorItems(language: string): Promise<OrderMonitorView[]> {
+  return invoke<OrderMonitorView[]>("list_order_monitor_items", { language });
 }
 
 export function getSyncStatus(): Promise<SyncStatus> {
   return invoke<SyncStatus>("get_sync_status");
+}
+
+export function getAuthStatus(): Promise<AuthStatusView> {
+  return invoke<AuthStatusView>("get_auth_status");
+}
+
+export function startEveSsoLogin(): Promise<AuthStatusView> {
+  return invoke<AuthStatusView>("start_eve_sso_login");
+}
+
+export function syncCharacterOrders(): Promise<CharacterOrderSyncSummary> {
+  return invoke<CharacterOrderSyncSummary>("sync_character_orders");
 }
 
 export function getBackendConnectionStatus(): Promise<BackendConnectionStatusView> {

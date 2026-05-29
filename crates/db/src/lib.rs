@@ -1,7 +1,12 @@
+pub mod auth;
 pub mod catalog;
 pub mod market;
 pub mod schema;
 
+pub use auth::{
+    AuthDbError, AuthRepository, AuthorizedCharacter, CharacterAuthToken, CharacterOrderSnapshot,
+    CharacterOrderSnapshotInput, CharacterOrderSyncSummary,
+};
 pub use catalog::{
     CatalogDbError, CatalogImportProgress, CatalogImportTable, CatalogRepository, CatalogStatus,
     ImportCatalogInput, InventoryTypeView,
