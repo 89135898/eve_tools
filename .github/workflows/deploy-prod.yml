@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Validate deployment configuration
         shell: bash
@@ -51,12 +51,12 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Cache Cargo registry and build outputs
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
 
@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test \
+          cargo test --locked \
             -p evetools-domain \
             -p evetools-esi \
             -p evetools-db \
@@ -76,8 +76,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p evetools-http-api --bin evetools-http-api
-          cargo build --release -p evetools-worker --bin sync-public-market-region
+          cargo build --locked --release -p evetools-http-api --bin evetools-http-api
+          cargo build --locked --release -p evetools-worker --bin sync-public-market-region
 
       - name: Package release artifact
         shell: bash
@@ -91,7 +91,7 @@ jobs:
           tar -tzf "${ARTIFACT_NAME}"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
@@ -101,10 +101,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          aws s3 cp \
-            "${ARTIFACT_NAME}" \
-            "s3://${DEPLOY_BUCKET}/releases/${GITHUB_SHA}/${ARTIFACT_NAME}" \
-            --only-show-errors
+          artifact_key="releases/${GITHUB_SHA}/${ARTIFACT_NAME}"
+          upload_error="$(mktemp)"
+
+          if aws s3api put-object \
+            --bucket "${DEPLOY_BUCKET}" \
+            --key "${artifact_key}" \
+            --body "${ARTIFACT_NAME}" \
+            --if-none-match "*" 2>"${upload_error}"; then
+            rm -f "${upload_error}"
+          elif grep -q "PreconditionFailed" "${upload_error}"; then
+            echo "Artifact already exists at s3://${DEPLOY_BUCKET}/${artifact_key}; reusing immutable release artifact."
+            rm -f "${upload_error}"
+          else
+            cat "${upload_error}" >&2
+            rm -f "${upload_error}"
+            exit 1
+          fi
 
       - name: Activate release through SSM
         shell: bash
@@ -119,13 +132,16 @@ jobs:
           deploy_bucket="${DEPLOY_BUCKET}"
           release_root="/opt/evetools/releases"
           release_dir="\${release_root}/\${release_sha}"
+          next_link="/opt/evetools/.current-\${release_sha}"
           archive_path="/tmp/\${artifact_name}"
 
           sudo mkdir -p "\${release_dir}"
           aws s3 cp "s3://\${deploy_bucket}/releases/\${release_sha}/\${artifact_name}" "\${archive_path}" --only-show-errors
-          sudo tar -xzf "\${archive_path}" -C "\${release_dir}"
+          sudo tar --no-same-owner -xzf "\${archive_path}" -C "\${release_dir}"
+          sudo chown -R root:root "\${release_dir}"
           sudo chmod +x "\${release_dir}/bin/evetools-http-api" "\${release_dir}/bin/sync-public-market-region"
-          sudo ln -sfn "\${release_dir}" /opt/evetools/current
+          sudo ln -sfn "\${release_dir}" "\${next_link}"
+          sudo mv -Tf "\${next_link}" /opt/evetools/current
           sudo systemctl daemon-reload
           sudo systemctl restart evetools-http-api.service
           sudo systemctl try-restart evetools-market-sync.timer || true

@@ -24,6 +24,8 @@ S3 artifact 路径：
 s3://$DEPLOY_BUCKET/releases/$GITHUB_SHA/evetools-$GITHUB_SHA-linux-x86_64.tar.gz
 ```
 
+workflow 使用 S3 conditional write 上传 artifact；同一个 commit SHA 的 artifact 已存在时不会覆盖对象。
+
 EC2 release 路径：
 
 ```text
@@ -143,6 +145,8 @@ S3 读取权限示例：
 - AWS CLI
 - `tar`
 - `systemd`
+
+目标实例需要是 x86_64 Linux，并且运行时兼容 GitHub `ubuntu-24.04` runner 构建出的 GNU/Linux 二进制。
 
 创建目录：
 
