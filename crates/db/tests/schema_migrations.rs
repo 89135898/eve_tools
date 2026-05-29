@@ -29,5 +29,5 @@ async fn records_versioned_sqlx_migrations() {
     .await
     .unwrap();
 
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4]);
 }

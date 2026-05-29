@@ -58,7 +58,8 @@ mod tests {
             vec![
                 (1, "create catalog schema"),
                 (2, "add catalog localizations"),
-                (3, "add market sync tables")
+                (3, "add market sync tables"),
+                (4, "add market sync operations")
             ]
         );
     }
@@ -129,6 +130,21 @@ mod tests {
         assert_schema_contains("PRIMARY KEY (sync_run_id, order_id)");
         assert_schema_contains("idx_evetools_market_orders_station_type");
         assert_schema_contains("idx_evetools_market_sync_runs_region_status_completed");
+    }
+
+    #[test]
+    fn adds_market_sync_operation_metadata() {
+        assert_schema_contains("ALTER TABLE evetools_catalog.market_sync_runs");
+        assert_schema_contains("lease_owner TEXT");
+        assert_schema_contains("lease_expires_at TIMESTAMPTZ");
+        assert_schema_contains("started_by TEXT");
+        assert_schema_contains("attempt INTEGER NOT NULL DEFAULT 1");
+        assert_schema_contains("duration_ms BIGINT");
+        assert_schema_contains("completed_reason TEXT");
+        assert_schema_contains("superseded_before_lease_index");
+        assert_schema_contains("ROW_NUMBER() OVER");
+        assert_schema_contains("idx_evetools_market_sync_runs_one_active_region");
+        assert_schema_contains("WHERE status IN ('leased', 'running')");
     }
 
     #[test]
