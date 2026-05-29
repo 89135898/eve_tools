@@ -21,7 +21,7 @@ env:
 jobs:
   deploy:
     name: Build and deploy backend
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     steps:
