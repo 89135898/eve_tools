@@ -1201,11 +1201,13 @@ dependencies = [
 name = "evetools-worker"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "evetools-db",
  "evetools-esi",
  "evetools-test-support",
  "httpmock",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
