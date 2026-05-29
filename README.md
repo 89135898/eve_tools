@@ -130,12 +130,34 @@ cargo run -p evetools-worker --bin sync-public-market-region
 同步第一版全部主流 NPC 交易点：
 
 ```bash
-for region_id in 10000002 10000043 10000032 10000030 10000042; do
-  cargo run -p evetools-worker --bin sync-public-market-region -- --region-id "$region_id"
-done
+cargo run -p evetools-worker --bin sync-public-market-region -- --all-default-regions
 ```
 
-CLI 会运行数据库 migrations、写入/更新默认 trade hubs、创建 `market_sync_runs`，并把过滤后的订单写入 `market_order_snapshots`。成功后会输出本次 `sync_run_id`。`EVETOOLS_ESI_BASE_URL` 仅用于本地测试或 mock ESI，不需要在正常使用时设置。
+CLI 会运行数据库 migrations、写入/更新默认 trade hubs、创建 `market_sync_runs`，并把过滤后的订单写入 `market_order_snapshots`。成功后会输出本次 `sync_run_id`。`--json` 会输出不包含数据库连接串的 summary 数组，便于 scheduler 或 CI job 解析。`EVETOOLS_ESI_BASE_URL` 仅用于本地测试或 mock ESI，不需要在正常使用时设置。
+
+### 生产同步任务
+
+生产环境中，桌面端不运行同步任务。公开市场同步由服务端 scheduler 触发 `evetools-worker`：
+
+```bash
+export EVETOOLS_DATABASE_URL="<worker-postgres-url-with-sslmode-require>"
+cargo run -p evetools-worker --bin sync-public-market-region -- \
+  --all-default-regions \
+  --started-by production-scheduler \
+  --lease-ttl-seconds 1200 \
+  --max-age-seconds 600 \
+  --json
+```
+
+`--all-default-regions` 会按顺序同步 Jita、Amarr、Dodixie、Rens、Hek 所在 region。Worker 会为每个 region 获取数据库 lease；如果另一个 worker 已经在同步同一 region，本次运行会返回 `already-running` 并以成功退出，避免 scheduler 因正常锁竞争误报失败。`--max-age-seconds` 用于跳过仍足够新的快照，减少 ESI 请求和数据库写入。
+
+本阶段不接入监控报警平台。生产健康状态通过 HTTP API 暴露：
+
+- `GET /health`：进程存活。
+- `GET /ready`：数据库、catalog 和市场同步可用性。
+- `GET /sync-health`：每个 trade hub 的最新同步时间、状态、失败信息和连续失败次数。
+
+`EVETOOLS_DATABASE_URL` 只能配置在服务端 HTTP API、worker、catalog admin CLI 或托管 job 环境中。不要把它写入桌面端 `.env`，也不要打包进 Tauri 应用。桌面端只使用 `EVETOOLS_API_BASE_URL` 访问 hosted API。
 
 同步至少一个 region 后，先启动 hosted HTTP API，再启动桌面端查看快照驱动的 Selection Discovery：
 
@@ -168,6 +190,8 @@ pnpm --dir apps/desktop dev
 `crates/http-api` 是第一版 hosted HTTP adapter，复用 `EveToolsReadApi`，提供：
 
 - `GET /health`
+- `GET /ready`
+- `GET /sync-health`
 - `GET /catalog/status`
 - `GET /inventory-types/{type_id}?language=zh-CN`
 - `GET /inventory-types/search?query=tri&language=en-US&limit=20`
@@ -215,6 +239,7 @@ cargo test -p evetools-db --test catalog_repository -- --nocapture
 - `0001_create_catalog_schema.sql`：SDE catalog 核心表、外键和基础索引。
 - `0002_add_catalog_localizations.sql`：标准化多语言 localization 表和语言检索索引。
 - `0003_add_market_sync_tables.sql`：trade hub、market sync run 和订单快照表。
+- `0004_add_market_sync_operations.sql`：公开市场同步 lease、运行元数据和活跃同步约束。
 
 应用仍通过 `migrate_catalog_schema()` 执行迁移；它会调用内嵌的 SQLx migrator，并在数据库的 `_sqlx_migrations` 表记录已应用版本。新增 schema 变更时不要再把 SQL 追加到 Rust 字符串常量中，应新增一个递增编号的 migration 文件，并补充对应 repository 或 schema 测试。
 
