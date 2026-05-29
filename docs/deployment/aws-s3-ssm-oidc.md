@@ -155,7 +155,9 @@ sudo chown root:root /opt/evetools /opt/evetools/releases
 
 ```bash
 sudo mkdir -p /etc/evetools
-sudo install -m 600 /dev/null /etc/evetools/evetools.env
+sudo touch /etc/evetools/evetools.env
+sudo chown root:root /etc/evetools/evetools.env
+sudo chmod 600 /etc/evetools/evetools.env
 ```
 
 `/etc/evetools/evetools.env` 示例：
