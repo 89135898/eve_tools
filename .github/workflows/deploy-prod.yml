@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: deploy-prod
@@ -18,10 +17,6 @@ concurrency:
 env:
   RUST_VERSION: "1.82.0"
   ARTIFACT_NAME: evetools-${{ github.sha }}-linux-x86_64.tar.gz
-  AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION }}
-  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN != '' && vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
-  DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET != '' && vars.DEPLOY_BUCKET || secrets.DEPLOY_BUCKET }}
-  EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID != '' && vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
 
 jobs:
   deploy:
@@ -33,15 +28,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Validate deployment configuration
+      - name: Validate SSH deployment configuration
         shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
 
           missing=0
-          for name in AWS_REGION AWS_ROLE_ARN DEPLOY_BUCKET EC2_INSTANCE_ID; do
+          for name in SSH_HOST SSH_USER SSH_PRIVATE_KEY SSH_KNOWN_HOSTS; do
             if [ -z "${!name}" ]; then
-              echo "::error::${name} is required as a GitHub repository variable or secret"
+              echo "::error::${name} is required as a GitHub Actions secret"
               missing=1
             fi
           done
@@ -90,115 +90,53 @@ jobs:
           tar -C dist -czf "${ARTIFACT_NAME}" bin
           tar -tzf "${ARTIFACT_NAME}"
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          role-session-name: evetools-github-actions-deploy
-
-      - name: Upload release artifact to S3
+      - name: Prepare SSH
         shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          artifact_key="releases/${GITHUB_SHA}/${ARTIFACT_NAME}"
-          upload_error="$(mktemp)"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
-          if aws s3api put-object \
-            --bucket "${DEPLOY_BUCKET}" \
-            --key "${artifact_key}" \
-            --body "${ARTIFACT_NAME}" \
-            --if-none-match "*" 2>"${upload_error}"; then
-            rm -f "${upload_error}"
-          elif grep -q "PreconditionFailed" "${upload_error}"; then
-            echo "Artifact already exists at s3://${DEPLOY_BUCKET}/${artifact_key}; reusing immutable release artifact."
-            rm -f "${upload_error}"
-          else
-            cat "${upload_error}" >&2
-            rm -f "${upload_error}"
-            exit 1
-          fi
-
-      - name: Activate release through SSM
+      - name: Upload release artifact over SSH
         shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          scp "${ARTIFACT_NAME}" "${SSH_USER}@${SSH_HOST}:/tmp/${ARTIFACT_NAME}"
+
+      - name: Activate release over SSH
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
 
-          ssm_script="$(cat <<REMOTE
+          ssh "${SSH_USER}@${SSH_HOST}" \
+            "RELEASE_SHA='${GITHUB_SHA}' ARTIFACT_NAME='${ARTIFACT_NAME}' bash -s" <<'REMOTE'
           set -euo pipefail
 
-          release_sha="${GITHUB_SHA}"
-          artifact_name="${ARTIFACT_NAME}"
-          deploy_bucket="${DEPLOY_BUCKET}"
           release_root="/opt/evetools/releases"
-          release_dir="\${release_root}/\${release_sha}"
-          next_link="/opt/evetools/.current-\${release_sha}"
-          archive_path="/tmp/\${artifact_name}"
+          release_dir="${release_root}/${RELEASE_SHA}"
+          next_link="/opt/evetools/.current-${RELEASE_SHA}"
+          archive_path="/tmp/${ARTIFACT_NAME}"
 
-          sudo mkdir -p "\${release_dir}"
-          aws s3 cp "s3://\${deploy_bucket}/releases/\${release_sha}/\${artifact_name}" "\${archive_path}" --only-show-errors
-          sudo tar --no-same-owner -xzf "\${archive_path}" -C "\${release_dir}"
-          sudo chown -R root:root "\${release_dir}"
-          sudo chmod +x "\${release_dir}/bin/evetools-http-api" "\${release_dir}/bin/sync-public-market-region"
-          sudo ln -sfn "\${release_dir}" "\${next_link}"
-          sudo mv -Tf "\${next_link}" /opt/evetools/current
+          sudo mkdir -p "${release_dir}"
+          sudo tar --no-same-owner -xzf "${archive_path}" -C "${release_dir}"
+          sudo chown -R root:root "${release_dir}"
+          sudo chmod +x "${release_dir}/bin/evetools-http-api" "${release_dir}/bin/sync-public-market-region"
+          sudo ln -sfn "${release_dir}" "${next_link}"
+          sudo mv -Tf "${next_link}" /opt/evetools/current
           sudo systemctl daemon-reload
           sudo systemctl restart evetools-http-api.service
           sudo systemctl try-restart evetools-market-sync.timer || true
+          rm -f "${archive_path}"
           REMOTE
-          )"
-
-          jq -n --arg script "$ssm_script" '{commands: [$script]}' > ssm-parameters.json
-
-          command_id="$(aws ssm send-command \
-            --document-name AWS-RunShellScript \
-            --instance-ids "${EC2_INSTANCE_ID}" \
-            --comment "Deploy EveTools ${GITHUB_SHA}" \
-            --parameters file://ssm-parameters.json \
-            --query 'Command.CommandId' \
-            --output text)"
-
-          echo "SSM command id: ${command_id}"
-
-          for attempt in $(seq 1 60); do
-            status="$(aws ssm get-command-invocation \
-              --command-id "${command_id}" \
-              --instance-id "${EC2_INSTANCE_ID}" \
-              --query 'Status' \
-              --output text 2>/dev/null || true)"
-
-            echo "SSM status attempt ${attempt}: ${status}"
-
-            case "$status" in
-              Success)
-                aws ssm get-command-invocation \
-                  --command-id "${command_id}" \
-                  --instance-id "${EC2_INSTANCE_ID}" \
-                  --query 'StandardOutputContent' \
-                  --output text
-                exit 0
-                ;;
-              Failed|Cancelled|TimedOut|Cancelling)
-                aws ssm get-command-invocation \
-                  --command-id "${command_id}" \
-                  --instance-id "${EC2_INSTANCE_ID}" \
-                  --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
-                  --output json
-                exit 1
-                ;;
-              Pending|InProgress|Delayed|"")
-                sleep 10
-                ;;
-              *)
-                sleep 10
-                ;;
-            esac
-          done
-
-          echo "::error::SSM command did not finish within 10 minutes"
-          aws ssm get-command-invocation \
-            --command-id "${command_id}" \
-            --instance-id "${EC2_INSTANCE_ID}" \
-            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
-            --output json || true
-          exit 1
