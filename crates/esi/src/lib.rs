@@ -5,8 +5,8 @@ use thiserror::Error;
 
 pub use client::EsiClient;
 pub use models::{
-    EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType, EsiTypeInfo, ResolvedInventoryType,
-    UniverseIdEntry, UniverseIdsResponse,
+    EsiCharacterIdentity, EsiCharacterOrder, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType,
+    EsiTokenResponse, EsiTypeInfo, ResolvedInventoryType, UniverseIdEntry, UniverseIdsResponse,
 };
 
 #[derive(Debug, Error)]

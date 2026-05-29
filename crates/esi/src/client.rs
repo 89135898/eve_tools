@@ -1,5 +1,6 @@
 use crate::{
-    EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType, EsiTypeInfo,
+    EsiCharacterOrder, EsiError, EsiMarketHistoryDay, EsiMarketOrder, EsiOrderType,
+    EsiTokenResponse, EsiTypeInfo,
     ResolvedInventoryType, UniverseIdsResponse,
 };
 use serde::de::DeserializeOwned;
@@ -162,6 +163,53 @@ impl EsiClient {
             self.base_url
         );
         let request = self.http.get(url);
+        self.decode_response(request.send().await).await
+    }
+
+    pub async fn exchange_authorization_code(
+        &self,
+        sso_base_url: &str,
+        client_id: &str,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+    ) -> Result<EsiTokenResponse, EsiError> {
+        let url = format!("{}/v2/oauth/token", sso_base_url.trim_end_matches('/'));
+        let request = self.http.post(url).form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
+        ]);
+        self.decode_response(request.send().await).await
+    }
+
+    pub async fn refresh_access_token(
+        &self,
+        sso_base_url: &str,
+        client_id: &str,
+        refresh_token: &str,
+    ) -> Result<EsiTokenResponse, EsiError> {
+        let url = format!("{}/v2/oauth/token", sso_base_url.trim_end_matches('/'));
+        let request = self.http.post(url).form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id),
+            ("refresh_token", refresh_token),
+        ]);
+        self.decode_response(request.send().await).await
+    }
+
+    pub async fn character_orders(
+        &self,
+        character_id: i64,
+        access_token: &str,
+    ) -> Result<Vec<EsiCharacterOrder>, EsiError> {
+        let url = format!(
+            "{}/latest/characters/{character_id}/orders/?datasource=tranquility",
+            self.base_url
+        );
+        let request = self.http.get(url).bearer_auth(access_token);
         self.decode_response(request.send().await).await
     }
 
