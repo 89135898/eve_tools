@@ -4,6 +4,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use thiserror::Error;
 
 const MAX_STATION_ORDER_BOOK_LIMIT: i64 = 500;
+const POSTGRES_BIND_PARAMETER_LIMIT: usize = 65_535;
+const MARKET_ORDER_SNAPSHOT_COLUMN_COUNT: usize = 14;
+const MARKET_ORDER_SNAPSHOT_INSERT_CHUNK_SIZE: usize =
+    POSTGRES_BIND_PARAMETER_LIMIT / MARKET_ORDER_SNAPSHOT_COLUMN_COUNT - 1;
 
 #[derive(Debug, Error)]
 pub enum MarketDbError {
@@ -324,39 +328,44 @@ impl MarketRepository {
         self.ensure_sync_run_can_write_snapshots(sync_run_id)
             .await?;
 
+        let mut transaction = self.pool.begin().await?;
+
         sqlx::query("DELETE FROM evetools_catalog.market_order_snapshots WHERE sync_run_id = $1")
             .persistent(false)
             .bind(sync_run_id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
 
-        if orders.is_empty() {
-            return Ok(());
+        for chunk in market_order_snapshot_insert_chunks(orders) {
+            let mut query = QueryBuilder::<Postgres>::new(
+                "INSERT INTO evetools_catalog.market_order_snapshots
+                    (sync_run_id, region_id, station_id, type_id, order_id, is_buy_order, price,
+                     volume_remain, volume_total, issued, duration, min_volume, order_range, system_id) ",
+            );
+            query.push_values(chunk, |mut row_builder, order| {
+                row_builder
+                    .push_bind(order.sync_run_id)
+                    .push_bind(order.region_id)
+                    .push_bind(order.station_id)
+                    .push_bind(order.type_id)
+                    .push_bind(order.order_id)
+                    .push_bind(order.is_buy_order)
+                    .push_bind(order.price)
+                    .push_bind(order.volume_remain)
+                    .push_bind(order.volume_total)
+                    .push_bind(&order.issued)
+                    .push_bind(order.duration)
+                    .push_bind(order.min_volume)
+                    .push_bind(&order.order_range)
+                    .push_bind(order.system_id);
+            });
+            query
+                .build()
+                .persistent(false)
+                .execute(&mut *transaction)
+                .await?;
         }
-
-        let mut query = QueryBuilder::<Postgres>::new(
-            "INSERT INTO evetools_catalog.market_order_snapshots
-                (sync_run_id, region_id, station_id, type_id, order_id, is_buy_order, price,
-                 volume_remain, volume_total, issued, duration, min_volume, order_range, system_id) ",
-        );
-        query.push_values(orders, |mut row_builder, order| {
-            row_builder
-                .push_bind(order.sync_run_id)
-                .push_bind(order.region_id)
-                .push_bind(order.station_id)
-                .push_bind(order.type_id)
-                .push_bind(order.order_id)
-                .push_bind(order.is_buy_order)
-                .push_bind(order.price)
-                .push_bind(order.volume_remain)
-                .push_bind(order.volume_total)
-                .push_bind(&order.issued)
-                .push_bind(order.duration)
-                .push_bind(order.min_volume)
-                .push_bind(&order.order_range)
-                .push_bind(order.system_id);
-        });
-        query.build().persistent(false).execute(&self.pool).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -940,6 +949,12 @@ fn market_order_from_record(row: MarketOrderSnapshotRecord) -> MarketOrderSnapsh
     }
 }
 
+fn market_order_snapshot_insert_chunks(
+    orders: &[MarketOrderSnapshotInput],
+) -> std::slice::Chunks<'_, MarketOrderSnapshotInput> {
+    orders.chunks(MARKET_ORDER_SNAPSHOT_INSERT_CHUNK_SIZE)
+}
+
 fn station_order_book_from_record(row: StationOrderBookRecord) -> StationOrderBook {
     StationOrderBook {
         sync_run_id: row.0,
@@ -1005,5 +1020,44 @@ fn sync_health_thresholds(hub_id: &str) -> (i64, i64) {
         "jita" => (15 * 60, 30 * 60),
         "amarr" => (30 * 60, 60 * 60),
         _ => (45 * 60, 90 * 60),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(sync_run_id: i64) -> MarketOrderSnapshotInput {
+        MarketOrderSnapshotInput {
+            sync_run_id,
+            region_id: 10000002,
+            station_id: 60003760,
+            type_id: 34,
+            order_id: 7_000_000_000 + sync_run_id,
+            is_buy_order: true,
+            price: 5.01,
+            volume_remain: 500_000,
+            volume_total: 1_000_000,
+            issued: "2026-05-25T11:45:00Z".to_string(),
+            duration: 90,
+            min_volume: 1,
+            order_range: "station".to_string(),
+            system_id: 30000142,
+        }
+    }
+
+    #[test]
+    fn market_order_snapshot_insert_chunks_respect_postgres_bind_limit() {
+        let orders = vec![snapshot(42); MARKET_ORDER_SNAPSHOT_INSERT_CHUNK_SIZE + 1];
+
+        let chunks: Vec<_> = market_order_snapshot_insert_chunks(&orders).collect();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), MARKET_ORDER_SNAPSHOT_INSERT_CHUNK_SIZE);
+        assert_eq!(chunks[1].len(), 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() * MARKET_ORDER_SNAPSHOT_COLUMN_COUNT
+                <= POSTGRES_BIND_PARAMETER_LIMIT));
     }
 }
